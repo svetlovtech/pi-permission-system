@@ -2,6 +2,7 @@ export type PermissionDecisionState =
   | "approved"
   | "approved_for_session"
   | "approved_for_serving_session"
+  | "approved_forever"
   | "denied"
   | "denied_with_reason";
 
@@ -35,6 +36,7 @@ export interface PermissionDecisionUi {
 
 const APPROVE_OPTION = "Yes";
 const APPROVE_FOR_SESSION_OPTION = "Yes, for this session";
+const APPROVE_FOREVER_OPTION = "Yes, allow forever";
 const DENY_OPTION = "No";
 const DENY_WITH_REASON_OPTION = "No, provide reason";
 
@@ -72,6 +74,7 @@ export function isPermissionDecisionState(
     value === "approved" ||
     value === "approved_for_session" ||
     value === "approved_for_serving_session" ||
+    value === "approved_forever" ||
     value === "denied" ||
     value === "denied_with_reason"
   );
@@ -80,6 +83,22 @@ export function isPermissionDecisionState(
 export interface RequestPermissionOptions {
   /** Override the "for this session" option label (e.g. to show the suggested pattern). */
   sessionLabel?: string;
+  /** Override the "allow forever" option label (e.g. to show the suggested pattern). */
+  foreverLabel?: string;
+  /**
+   * When the user answers a permission ask in Telegram first, the bridge
+   * extension emits `pi-telegram-bridge:resolve-permission`; the inline dialog
+   * subscribes and completes with the given decision. Absent when no bridge is
+   * active (permission dialog falls back to terminal-only).
+   */
+  externalResolve?: {
+    /** Stable id of the permission ask (from PromptPermissionDetails.requestId). */
+    requestId: string;
+    /** Event bus to subscribe on (the steered pi.events emitter). */
+    events: {
+      on(channel: string, handler: (data: unknown) => void): () => void;
+    };
+  };
   /**
    * Forwarded asks only: when set, choosing the "for this session" option opens
    * a second select asking whether the grant applies to the requesting subagent
@@ -98,9 +117,11 @@ export async function requestPermissionDecisionFromUi(
   options?: RequestPermissionOptions,
 ): Promise<PermissionPromptDecision> {
   const sessionOption = options?.sessionLabel ?? APPROVE_FOR_SESSION_OPTION;
+  const foreverOption = options?.foreverLabel ?? APPROVE_FOREVER_OPTION;
   const decisionOptions = [
     APPROVE_OPTION,
     sessionOption,
+    foreverOption,
     DENY_OPTION,
     DENY_WITH_REASON_OPTION,
   ] as const;
@@ -135,6 +156,13 @@ export async function requestPermissionDecisionFromUi(
     return {
       approved: true,
       state: "approved_for_session",
+    };
+  }
+
+  if (selected === foreverOption) {
+    return {
+      approved: true,
+      state: "approved_forever",
     };
   }
 

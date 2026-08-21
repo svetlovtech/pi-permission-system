@@ -26,6 +26,12 @@ export interface GateDescriptor {
    * interface — the runner never needs to know which case applies.
    */
   sessionApproval?: SessionApproval;
+  /**
+   * Forever-approval suggestion for the "allow forever" option.
+   * Mirrors {@link sessionApproval} but records a persistent config rule
+   * rather than an in-memory session rule.
+   */
+  foreverApproval?: SessionApproval;
   /** Details passed to the interactive permission prompt (requestId is added by the runner). */
   promptDetails: Omit<PromptPermissionDetails, "requestId">;
   /** Extra context fields written to the review log alongside gate outcomes. */

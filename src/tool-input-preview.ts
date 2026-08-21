@@ -1,9 +1,9 @@
 import { safeJsonStringify } from "./json-safe-stringify";
 import { redactedJsonStringify } from "./log-redaction";
 
-export const TOOL_INPUT_PREVIEW_MAX_LENGTH = 200;
+export const TOOL_INPUT_PREVIEW_MAX_LENGTH = Number.POSITIVE_INFINITY;
 export const TOOL_INPUT_LOG_PREVIEW_MAX_LENGTH = 1000;
-export const TOOL_TEXT_SUMMARY_MAX_LENGTH = 80;
+export const TOOL_TEXT_SUMMARY_MAX_LENGTH = Number.POSITIVE_INFINITY;
 
 export function truncateInlineText(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength)}…` : value;

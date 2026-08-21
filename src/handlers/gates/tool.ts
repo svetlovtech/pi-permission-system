@@ -108,6 +108,10 @@ export function describeToolGate(
       suggestion.surface,
       suggestion.pattern,
     ),
+    foreverApproval: SessionApproval.single(
+      suggestion.surface,
+      suggestion.pattern,
+    ),
     promptDetails: {
       source: "tool_call",
       agentName: tcc.agentName,
@@ -116,6 +120,7 @@ export function describeToolGate(
       toolCallId: tcc.toolCallId,
       toolName: tcc.toolName,
       sessionLabel: suggestion.label,
+      foreverLabel: suggestion.foreverLabel,
       accessIntent,
       ...permissionLogContext,
     },

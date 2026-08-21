@@ -98,15 +98,22 @@ interface PromptTheme {
 }
 
 const DEFAULT_SESSION_LABEL = "Yes, for this session";
+const DEFAULT_FOREVER_LABEL = "Yes, allow forever";
 
 const OPTION_LABELS: Record<PromptKey, string> = {
   y: "Yes",
   s: DEFAULT_SESSION_LABEL,
+  f: DEFAULT_FOREVER_LABEL,
   n: "No",
   r: "No, provide reason",
 };
 
-const OPTION_ORDER: readonly PromptKey[] = ["y", "s", "n", "r"];
+const OPTION_ORDER: readonly PromptKey[] = ["y", "s", "f", "n", "r"];
+
+/** Fixed chrome rows in the expanded pager: title, two blanks, hint. */
+const EXPANDED_CHROME_ROWS = 5;
+/** Terminal rows assumed when the real size is unavailable. */
+const FALLBACK_TERMINAL_ROWS = 30;
 
 export function presentInlinePermissionPrompt(
   view: PermissionPromptView,
@@ -117,11 +124,12 @@ export function presentInlinePermissionPrompt(
   const config: PromptModelConfig = {
     doublePressToConfirm: view.doublePressToConfirm,
     sessionLabel: options?.sessionLabel ?? DEFAULT_SESSION_LABEL,
+    foreverLabel: options?.foreverLabel ?? DEFAULT_FOREVER_LABEL,
     sessionScope: options?.sessionScope,
   };
   return view.ui.custom<PermissionPromptDecision>(
-    (tui, theme, keybindings, done) =>
-      new PermissionPromptComponent(
+    (tui, theme, keybindings, done) => {
+      const component = new PermissionPromptComponent(
         theme,
         config,
         title,
@@ -131,10 +139,51 @@ export function presentInlinePermissionPrompt(
         () => {
           tui.requestRender();
         },
-        done,
-      ),
+        (decision) => done(decision),
+        () => tui.terminal.rows,
+      );
+
+      // Telegram-bridge hook: when the user answers the permission ask in
+      // Telegram first, the bridge emits pi-telegram-bridge:resolve-permission
+      // and this dialog completes with the injected decision.
+      const channel = "pi-telegram-bridge:resolve-permission";
+      const ext = options?.externalResolve;
+      let unsubscribe: (() => void) | undefined;
+      if (ext) {
+        const handler = (data: unknown) => {
+          const msg = (data ?? {}) as Record<string, unknown>;
+          if (msg.requestId !== ext.requestId) return;
+          unsubscribe?.();
+          done(toPermissionDecision(msg.decision as unknown));
+        };
+        unsubscribe = ext.events.on(channel, handler);
+        // Re-capture done so the component's terminal path and the bridge
+        // path both resolve exactly once. done is idempotent per pi contract.
+        void component;
+      }
+
+      return component;
+    },
     { overlay: false },
   );
+}
+
+/** Normalize an untrusted resolved permission-decision payload. */
+function toPermissionDecision(raw: unknown): PermissionPromptDecision {
+  if (typeof raw === "object" && raw !== null) {
+    const r = raw as Record<string, unknown>;
+    if (r.approved === true && typeof r.state === "string") {
+      return {
+        approved: true,
+        state: r.state as PermissionPromptDecision["state"],
+      };
+    }
+    if (r.approved === false && typeof r.state === "string") {
+      return { approved: false, state: r.state as PermissionPromptDecision["state"] };
+    }
+  }
+  // Unrecognised → deny with reason (safe default for a permission gate).
+  return { approved: false, state: "denied" };
 }
 
 /**
@@ -167,6 +216,12 @@ class PermissionPromptComponent implements Component {
   private reasonBuffer = "";
   /** Whether the operator asked to see the complete request (ADR 0011 §4). */
   private expanded = false;
+  /** Scroll offset into the expanded full-request render (pager mode). */
+  private scrollOffset = 0;
+  /** Total lines of the last expanded render, for paging bounds. */
+  private lastExpandedTotal = 0;
+  /** Content rows available in the last expanded render, for paging bounds. */
+  private lastExpandedAvailable = 0;
 
   constructor(
     private readonly theme: PromptTheme,
@@ -177,6 +232,7 @@ class PermissionPromptComponent implements Component {
     private readonly handleAppAction: (data: string) => boolean,
     private readonly requestRender: () => void,
     private readonly done: (decision: PermissionPromptDecision) => void,
+    private readonly getTerminalRows: () => number,
   ) {
     this.state = initialPromptState(config);
   }
@@ -245,8 +301,22 @@ class PermissionPromptComponent implements Component {
       // One "expand" for the operator: the host expands its pending tool call
       // and the dialog expands its own render, on the same keystroke.
       this.expanded = !this.expanded;
+      this.scrollOffset = 0;
       this.requestRender();
       return;
+    }
+    if (this.state.step === "decision" && this.expanded) {
+      if (this.handleExpandedScroll(data)) {
+        return;
+      }
+      if (matchesKey(data, "escape")) {
+        // In the pager, escape returns to the compact dialog rather than
+        // denying outright: a mis-press while reading must not decide.
+        this.expanded = false;
+        this.scrollOffset = 0;
+        this.requestRender();
+        return;
+      }
     }
     const event = this.toEvent(data);
     if (event) {
@@ -306,15 +376,28 @@ class PermissionPromptComponent implements Component {
     if (outcome.state.step === "reason" && this.state.step !== "reason") {
       this.reasonBuffer = "";
     }
+    if (outcome.state.step !== "decision") {
+      // Reason and scope steps render the compact ask; leave the pager.
+      this.expanded = false;
+      this.scrollOffset = 0;
+    }
     this.state = outcome.state;
     this.requestRender();
   }
 
   private renderDecision(width: number): string[] {
+    if (this.expanded) {
+      return this.renderExpandedDecision(width);
+    }
     const ask = this.renderAsk(width);
     const lines = [this.theme.fg("accent", this.title), ...ask.lines, ""];
     for (const key of OPTION_ORDER) {
-      const label = key === "s" ? this.config.sessionLabel : OPTION_LABELS[key];
+      const label =
+        key === "s"
+          ? this.config.sessionLabel
+          : key === "f"
+            ? this.config.foreverLabel
+            : OPTION_LABELS[key];
       const selected = this.state.highlightedKey === key;
       const marker = selected ? "▶" : " ";
       const row = `${marker} (${key}) ${label}`;
@@ -323,6 +406,89 @@ class PermissionPromptComponent implements Component {
     lines.push("");
     lines.push(this.state.hint || this.hint(ask));
     return lines;
+  }
+
+  /**
+   * The expanded pager: the complete request, bounded to the terminal so the
+   * dialog never overflows the viewport (and the transcript scroll is never
+   * touched). Scrolling is paged with ↑/↓ (and j/k, pageUp/pageDown,
+   * home/end); decisions stay one keystroke away via the letter hotkeys.
+   */
+  private renderExpandedDecision(width: number): string[] {
+    const ask = this.renderAsk(width);
+    const total = ask.lines.length;
+    const reported = this.getTerminalRows();
+    const rows = reported > 0 ? reported : FALLBACK_TERMINAL_ROWS;
+    const available = Math.max(5, rows - EXPANDED_CHROME_ROWS);
+    const maxOffset = Math.max(0, total - available);
+    this.scrollOffset = Math.min(Math.max(0, this.scrollOffset), maxOffset);
+    this.lastExpandedTotal = total;
+    this.lastExpandedAvailable = available;
+    const window = ask.lines.slice(
+      this.scrollOffset,
+      this.scrollOffset + available,
+    );
+    return [
+      this.theme.fg("accent", this.title),
+      "",
+      ...window,
+      "",
+      this.state.hint || this.expandedHint(total > available),
+    ];
+  }
+
+  /**
+   * The pager hint: scroll position when the request overflows, the letter
+   * hotkeys (the options list is hidden in the pager), and the way back.
+   */
+  private expandedHint(scrolled: boolean): string {
+    const parts: string[] = [];
+    if (scrolled) {
+      parts.push(
+        `↑/↓ scroll · ${this.scrollOffset + 1}/${this.lastExpandedTotal}`,
+      );
+    }
+    parts.push("y yes · s session · f forever · n no · r reason");
+    parts.push("esc back · ctrl+o collapse");
+    return this.theme.fg("muted", parts.join(" · "));
+  }
+
+  /**
+   * Pager scroll keys for the expanded view. Returns true when the keystroke
+   * was a scroll action (handled); false when it should fall through to the
+   * decision model. Enter is always consumed here so a read cannot confirm
+   * the hidden highlighted option by accident.
+   */
+  private handleExpandedScroll(data: string): boolean {
+    const maxOffset = Math.max(
+      0,
+      this.lastExpandedTotal - this.lastExpandedAvailable,
+    );
+    const page = Math.max(1, this.lastExpandedAvailable - 1);
+    let next: number | undefined;
+    if (matchesKey(data, "up") || matchesKey(data, "k")) {
+      next = this.scrollOffset - 1;
+    } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
+      next = this.scrollOffset + 1;
+    } else if (matchesKey(data, "enter")) {
+      next = this.scrollOffset + 1;
+    } else if (matchesKey(data, "pageUp")) {
+      next = this.scrollOffset - page;
+    } else if (matchesKey(data, "pageDown")) {
+      next = this.scrollOffset + page;
+    } else if (matchesKey(data, "home")) {
+      next = 0;
+    } else if (matchesKey(data, "end")) {
+      next = maxOffset;
+    } else {
+      return false;
+    }
+    const clamped = Math.min(Math.max(0, next), maxOffset);
+    if (clamped !== this.scrollOffset) {
+      this.scrollOffset = clamped;
+      this.requestRender();
+    }
+    return true;
   }
 
   private renderReason(width: number): string[] {

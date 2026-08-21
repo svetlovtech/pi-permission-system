@@ -9,6 +9,7 @@ import {
 import { applyPermissionGate } from "#src/permission-gate";
 import { createPermissionRequestId } from "#src/permission-request-id";
 import type { ScopedPermissionResolver } from "#src/permission-resolver";
+import type { ForeverApprovalRecorder } from "#src/forever-approval-recorder";
 import type { SessionApprovalRecorder } from "#src/session-approval-recorder";
 import type { PermissionCheckResult } from "#src/types";
 import type {
@@ -39,6 +40,7 @@ export class GateRunner {
   constructor(
     private readonly resolver: ScopedPermissionResolver,
     private readonly recorder: SessionApprovalRecorder,
+    private readonly foreverRecorder: ForeverApprovalRecorder,
     private readonly prompter: AskEscalator,
     private readonly reporter: DecisionReporter,
     /**
@@ -177,6 +179,7 @@ export class GateRunner {
     const gateResult = await applyPermissionGate({
       state: check.state,
       sessionApproval: descriptor.sessionApproval?.toGateApproval(),
+      foreverApproval: descriptor.foreverApproval?.toGateApproval(),
       promptForApproval: async () => {
         const decision = await this.prompter.escalate({
           requestId,
@@ -195,9 +198,20 @@ export class GateRunner {
       messages,
     });
 
-    // 4. Determine whether session approval was granted
+    // 4. Determine whether session/forever approval was granted
     const hasSessionApproval =
       gateResult.action === "allow" && gateResult.sessionApproval !== undefined;
+    const hasForeverApproval =
+      gateResult.action === "allow" && gateResult.foreverApproval !== undefined;
+
+    // Derive resolution for the decision event — "forever" counts as a user approval.
+    const deriveResolutionArgs: Parameters<typeof deriveResolution> = [
+      check.state,
+      gateResult.action,
+      hasSessionApproval || hasForeverApproval,
+      confirmationUnavailable,
+      autoApproved,
+    ];
 
     // 5. Emit decision event
     this.emitDecision(
@@ -208,11 +222,7 @@ export class GateRunner {
         agentName,
         gateResult.action === "allow" ? "allow" : "deny",
         deriveResolution(
-          check.state,
-          gateResult.action,
-          hasSessionApproval,
-          confirmationUnavailable,
-          autoApproved,
+          ...deriveResolutionArgs,
         ),
       ),
     );
@@ -221,6 +231,11 @@ export class GateRunner {
     // hasSessionApproval already implies gateResult.action === "allow"
     if (hasSessionApproval && descriptor.sessionApproval) {
       this.recorder.recordSessionApproval(descriptor.sessionApproval);
+    }
+
+    // 7. Persist forever approval to config.json
+    if (hasForeverApproval && descriptor.foreverApproval) {
+      this.foreverRecorder.recordForeverApproval(descriptor.foreverApproval);
     }
 
     if (gateResult.action === "block") {

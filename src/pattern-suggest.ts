@@ -10,6 +10,8 @@ export interface SessionApprovalSuggestion {
   pattern: string;
   /** Human-readable label for the "for session" dialog option. */
   label: string;
+  /** Human-readable label for the "allow forever" dialog option. */
+  foreverLabel: string;
 }
 
 /**
@@ -157,5 +159,30 @@ export function suggestSessionPattern(
       break;
   }
 
-  return { surface, pattern, label: buildLabel(pattern, surface) };
+  return {
+    surface,
+    pattern,
+    label: buildLabel(pattern, surface),
+    foreverLabel: buildForeverLabel(pattern, surface),
+  };
+}
+
+function buildForeverLabel(pattern: string, surface: string): string {
+  switch (surface) {
+    case "bash":
+      return `Yes, allow bash "${pattern}" forever`;
+    case "mcp":
+      return `Yes, allow mcp tool "${pattern}" forever`;
+    case "skill":
+      return `Yes, allow skill "${pattern}" forever`;
+    case "external_directory":
+      return `Yes, allow external directory "${pattern}" forever`;
+    case "path":
+      return `Yes, allow path "${pattern}" forever`;
+    default:
+      if (PATH_BEARING_TOOLS.has(surface) && pattern !== "*") {
+        return `Yes, allow ${surface} "${pattern}" forever`;
+      }
+      return `Yes, allow tool "${surface}" forever`;
+  }
 }

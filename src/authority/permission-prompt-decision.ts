@@ -15,17 +15,18 @@ import {
  * forwards keystrokes to {@link reducePrompt} and renders the returned state.
  */
 
-/** The four decision hotkeys, in display order. */
-export type PromptKey = "y" | "s" | "n" | "r";
+/** The five decision hotkeys, in display order. */
+export type PromptKey = "y" | "s" | "f" | "n" | "r";
 
 /** Which sub-view the dialog is showing. */
 export type PromptStep = "decision" | "reason" | "scope";
 
-const OPTION_ORDER: readonly PromptKey[] = ["y", "s", "n", "r"];
+const OPTION_ORDER: readonly PromptKey[] = ["y", "s", "f", "n", "r"];
 
 const OPTION_VERBS: Record<PromptKey, string> = {
   y: "approve",
   s: "approve for this session",
+  f: "approve forever",
   n: "deny",
   r: "deny with a reason",
 };
@@ -36,6 +37,8 @@ export interface PromptModelConfig {
   doublePressToConfirm: boolean;
   /** Label shown beside the approve-for-session option. */
   sessionLabel: string;
+  /** Label shown beside the approve-forever option. */
+  foreverLabel: string;
   /**
    * Forwarded asks only: when set, confirming `s` opens a second step choosing
    * whether the grant applies to the requesting subagent only (least-privilege
@@ -182,6 +185,11 @@ function commit(
       return {
         kind: "decision",
         decision: { approved: true, state: "approved_for_session" },
+      };
+    case "f":
+      return {
+        kind: "decision",
+        decision: { approved: true, state: "approved_forever" },
       };
   }
 }

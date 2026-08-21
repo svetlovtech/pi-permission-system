@@ -20,6 +20,7 @@ import { registerBuiltinToolInputFormatters } from "./builtin-tool-input-formatt
 import { registerPermissionSystemCommand } from "./config-modal";
 import { getGlobalConfigPath } from "./config-paths";
 import { ConfigStore } from "./config-store";
+import { ConfigForeverApprovalRecorder } from "./forever-approval-recorder";
 import { DecisionAudit } from "./decision-audit";
 import { GateDecisionReporter } from "./decision-reporter";
 import { isYoloModeEnabled } from "./extension-config";
@@ -255,9 +256,11 @@ export default function piPermissionSystemExtension(pi: ExtensionAPI): void {
   );
 
   const reporter = new GateDecisionReporter(logger, pi.events);
+  const foreverRecorder = new ConfigForeverApprovalRecorder(agentDir);
   const gateRunner = new GateRunner(
     resolver,
     sessionRules,
+    foreverRecorder,
     authorizerSelection,
     reporter,
     isYoloEnabled,

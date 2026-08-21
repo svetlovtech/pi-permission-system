@@ -59,7 +59,7 @@ export class LocalUserAuthorizer implements TerminalAuthorizer {
         ? "Permission Required (Subagent)"
         : "Permission Required",
       details.payload,
-      buildRequestOptions(details),
+      buildRequestOptions(details, this.deps.events),
     );
   }
 }
@@ -71,18 +71,25 @@ export class LocalUserAuthorizer implements TerminalAuthorizer {
  */
 function buildRequestOptions(
   details: PromptPermissionDetails,
-): RequestPermissionOptions | undefined {
+  events: PermissionEventBus,
+): RequestPermissionOptions {
+  const options: RequestPermissionOptions = {
+    // Always allow the Telegram bridge to resolve this ask from Telegram.
+    externalResolve: {
+      requestId: details.requestId,
+      events,
+    },
+  };
+  if (details.sessionLabel) options.sessionLabel = details.sessionLabel;
+  if (details.foreverLabel) options.foreverLabel = details.foreverLabel;
+
   const pattern = details.sessionApproval?.patterns[0];
   if (details.forwarding && details.sessionApproval && pattern) {
-    return {
-      sessionScope: buildForwardedScopeLabels(
-        details.forwarding.requesterAgentName,
-        details.sessionApproval.surface,
-        pattern,
-      ),
-    };
+    options.sessionScope = buildForwardedScopeLabels(
+      details.forwarding.requesterAgentName,
+      details.sessionApproval.surface,
+      pattern,
+    );
   }
-  return details.sessionLabel
-    ? { sessionLabel: details.sessionLabel }
-    : undefined;
+  return options;
 }

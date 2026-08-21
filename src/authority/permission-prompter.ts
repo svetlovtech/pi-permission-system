@@ -45,6 +45,8 @@ export interface PromptPermissionDetails {
   toolInputPreview?: string;
   /** Override label for the "for this session" dialog option. */
   sessionLabel?: string;
+  /** Override label for the "allow forever" dialog option. */
+  foreverLabel?: string;
   /** Explicit display-surface override (a forwarded ask carries the child's original). */
   surface?: string | null;
   /** Explicit display-value override (a forwarded ask carries the child's original). */
