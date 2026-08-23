@@ -7,6 +7,7 @@ Permission enforcement extension for the Pi coding agent.
 - npm package: `@gotgenes/pi-permission-system`
 - repo: https://github.com/gotgenes/pi-packages (monorepo, this package lives in `packages/pi-permission-system`)
 - Pi loads THIS fork (not the npm package): `~/.pi/agent/settings.json` → `/home/dev/pi-forks/pi-permission-system`
+- GitHub mirror (origin): https://github.com/svetlovtech/pi-permission-system (private, standalone repo). Push: `git push origin main`.
 
 ## Baseline
 
