@@ -58,6 +58,13 @@ Rules:
 
 ## Build / check
 
+> **Runtime deps are REQUIRED for Pi to load the extension.** 32.0.1 added
+> third-party runtime deps (`zod`, `tree-sitter-bash`, `web-tree-sitter`).
+> Without `node_modules/` Pi fails with `Cannot find module 'zod'` at startup.
+> Install with: `sed 's/"catalog:"/"latest"/g' package.json && npm install
+> --omit=dev --no-save && git checkout -- package.json`
+> (`@earendil-works/*` imports are provided by Pi itself — do not install them).
+
 - Deps for type check: `sed 's/"catalog:"/"latest"/g' package.json && npm install --no-save && git checkout -- package.json` (upstream pins devDeps via pnpm catalogs npm cannot read).
 - `bun build src/index.ts --target=bun --external "@earendil-works/*" --outdir=/tmp/builddrop` — syntax/import gate.
 - `npx tsc --noEmit` with a config stubbing the monorepo `tsconfig.base.json` (lib es2023, moduleResolution bundler, types node) — full type gate.
