@@ -2,30 +2,45 @@ import type {
   BeforeAgentStartEventResult,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import type { PermissionResolver } from "#src/permission-resolver";
-import type { PermissionSession } from "#src/permission-session";
-import { resolveSkillPromptEntries } from "#src/skill-prompt-sanitizer";
-import { sanitizeAvailableToolsSection } from "#src/system-prompt-sanitizer";
-import { getToolNameFromValue, type ToolRegistry } from "#src/tool-registry";
-import type { PermissionState } from "#src/types";
+import { resolveSkillPromptEntries } from "#src/exposure/skill-prompt-sanitizer";
+import {
+  type RegisteredTools,
+  readRegisteredTools,
+  type ToolRegistry,
+} from "#src/exposure/tool-registry";
+import type { ToolSurfaceObservation } from "#src/exposure/tool-surface-baseline";
+import { renderToolSurface } from "#src/exposure/tool-surface-prompt";
+import type { DebugLogger } from "#src/logging/session-logger";
+import type { PermissionResolver } from "#src/policy/permission-resolver";
+import type { PermissionSession } from "#src/session/permission-session";
+import type { TurnPreparation } from "./session-turn-prep";
 
 /** Minimal subset of BeforeAgentStartEvent used by this handler. */
 interface BeforeAgentStartPayload {
   systemPrompt: string;
+  /**
+   * The parts Pi assembled the prompt from. `toolSnippets` is what lets this
+   * handler render the session's own tool list instead of editing the one Pi
+   * wrote — including in a child, whose inherited identity carries none.
+   */
+  systemPromptOptions?: {
+    toolSnippets?: Record<string, string>;
+  };
 }
 
 /**
  * Pure helper: returns true when the tool should be exposed to the agent.
- * Checks the tool-level permission (not command-level) so that a blanket
- * `bash: deny` hides the tool entirely before any invocation is attempted.
+ *
+ * A tool is withheld only when *every* value under its surface resolves to
+ * `deny`, so a blanket `bash: deny` hides the tool entirely while a partially
+ * permissive `bash: {"*": "deny", "git *": "ask"}` keeps it reachable (#815).
  */
 export function shouldExposeTool(
   toolName: string,
   agentName: string | null,
-  getToolPermission: (toolName: string, agentName?: string) => PermissionState,
+  isToolFullyDenied: (toolName: string, agentName?: string) => boolean,
 ): boolean {
-  const toolPermission = getToolPermission(toolName, agentName ?? undefined);
-  return toolPermission !== "deny";
+  return !isToolFullyDenied(toolName, agentName ?? undefined);
 }
 
 /**
@@ -33,23 +48,31 @@ export function shouldExposeTool(
  *
  * Recomputes the active tool set and the returned system-prompt override on
  * every fire (no memoization): the override must be returned each turn so that
- * skill filtering is reapplied and the wire prompt stays byte-stable, rather
- * than letting Pi reset to its skill-unfiltered base prompt on a cache hit.
+ * skill filtering is reapplied and the wire prompt stays stable across turns,
+ * rather than letting Pi reset to its skill-unfiltered base prompt on a cache
+ * hit.
+ *
+ * The tool surface is relocated rather than edited in place, so a subagent
+ * child's inherited identity stays byte-identical to its parent's (#890).
  *
  * Constructor deps:
+ * - `turnPrep` — brings the node up to date for the turn before anything reads
+ *   session state
  * - `session` — encapsulates all mutable session state and lifecycle operations
- * - `resolver` — owns permission-query surface: `getToolPermission`, skill check
- * - `toolRegistry` — Pi tool API subset (getActive + setActive)
- * - `warmParser` — warms the tree-sitter parser so the synchronous advisory
- *   bash path can decompose at gate parity; `before_agent_start` precedes any
- *   tool call, so triggering it here closes the pre-warm window (#309)
+ * - `resolver` — owns permission-query surface: `isToolFullyDenied`, skill check
+ * - `toolRegistry` — Pi tool API subset (getAll + getActive + setActive)
+ * - `logger` — records each change to the effective tool surface
+ *
+ * The active set is recomputed from the session's pre-filter tool surface
+ * every turn, so relaxing a rule restores the tool it had withheld (#873).
  */
 export class AgentPrepHandler {
   constructor(
+    private readonly turnPrep: TurnPreparation,
     private readonly session: PermissionSession,
     private readonly resolver: PermissionResolver,
     private readonly toolRegistry: ToolRegistry,
-    private readonly warmParser: () => void,
+    private readonly logger: DebugLogger,
   ) {}
 
   // eslint-disable-next-line @typescript-eslint/require-await
@@ -57,43 +80,35 @@ export class AgentPrepHandler {
     event: BeforeAgentStartPayload,
     ctx: ExtensionContext,
   ): Promise<BeforeAgentStartEventResult> {
-    // Fire-and-forget: warming is idempotent and best-effort, so it never
-    // delays agent start. A bash advisory query before it completes falls back
-    // to whole-string matching.
-    this.warmParser();
-    this.session.activate(ctx);
-    // Gate the mid-session runtime-config refresh on project trust too, so an
-    // untrusted project cannot slip its runtime config (e.g. `yoloMode`) in
-    // right before agent start after session_start withheld it (#644). The
-    // session_start handler already warned; do not re-warn on every start.
-    this.session.refreshConfig(ctx, ctx.isProjectTrusted());
+    this.turnPrep.prepare(ctx);
 
     const agentName = this.session.resolveAgentName(ctx, event.systemPrompt);
-    const activeTools = this.toolRegistry.getActive();
-    const allowedTools: string[] = [];
-
-    for (const tool of activeTools) {
-      const toolName = getToolNameFromValue(tool);
-      if (!toolName) {
-        continue;
-      }
-      if (
+    const registered = readRegisteredTools(this.toolRegistry.getAll());
+    const surface = this.session.resolveExposedTools(
+      this.observeToolSurface(registered),
+      (toolName) =>
         shouldExposeTool(toolName, agentName, (t, a) =>
-          this.resolver.getToolPermission(t, a),
-        )
-      ) {
-        allowedTools.push(toolName);
-      }
-    }
+          this.resolver.isToolFullyDenied(t, a),
+        ),
+    );
+    const allowedTools = [...surface.exposed];
 
     this.toolRegistry.setActive(allowedTools);
+    if (surface.changed) {
+      this.logger.debug("tool_surface.changed", {
+        exposed: surface.exposed,
+        withheld: surface.withheld,
+        restored: surface.restored,
+      });
+    }
 
-    const toolPromptResult = sanitizeAvailableToolsSection(
-      event.systemPrompt,
+    const toolSurfacePrompt = renderToolSurface(event.systemPrompt, {
       allowedTools,
-    );
+      toolSnippets: event.systemPromptOptions?.toolSnippets ?? {},
+      guidelinesByTool: registered.guidelinesByTool,
+    });
     const skillPromptResult = resolveSkillPromptEntries(
-      toolPromptResult.prompt,
+      toolSurfacePrompt,
       this.resolver,
       agentName,
       this.session.getPathNormalizer(),
@@ -102,5 +117,14 @@ export class AgentPrepHandler {
     return skillPromptResult.prompt !== event.systemPrompt
       ? { systemPrompt: skillPromptResult.prompt }
       : {};
+  }
+
+  private observeToolSurface(
+    registered: RegisteredTools,
+  ): ToolSurfaceObservation {
+    return {
+      active: readRegisteredTools(this.toolRegistry.getActive()).names,
+      registered: new Set(registered.names),
+    };
   }
 }

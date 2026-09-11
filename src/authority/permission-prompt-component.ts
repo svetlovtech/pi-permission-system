@@ -3,20 +3,7 @@ import type {
   ExtensionUIContext,
   KeybindingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, matchesKey } from "@earendil-works/pi-tui";
-import {
-  type PermissionPromptDecision,
-  type RequestPermissionOptions,
-  requestPermissionDecisionFromUi,
-} from "#src/authority/permission-dialog";
-import {
-  initialPromptState,
-  type PromptEvent,
-  type PromptKey,
-  type PromptModelConfig,
-  type PromptViewState,
-  reducePrompt,
-} from "#src/authority/permission-prompt-decision";
+import { type Component, Input, matchesKey } from "@earendil-works/pi-tui";
 import {
   completeViewBudget,
   type DialogView,
@@ -25,6 +12,23 @@ import {
 } from "#src/presentation/dialog-renderer";
 import { fitLinesToWidth } from "#src/presentation/line-fitting";
 import type { PromptPayload } from "#src/presentation/prompt-payload";
+import { collapsePastedNewlines } from "./bracketed-paste";
+import type { DecisionSource, UserDecisionSurface } from "./decision-source";
+import {
+  type PermissionPromptDecision,
+  type RequestPermissionOptions,
+  requestPermissionDecisionFromUi,
+  type UnattributedDecision,
+} from "./permission-dialog";
+import {
+  initialPromptState,
+  type PromptEvent,
+  type PromptKey,
+  type PromptModelConfig,
+  type PromptViewState,
+  reducePrompt,
+  visibleOptionKeys,
+} from "./permission-prompt-decision";
 
 /**
  * Inline `ctx.ui.custom` permission dialog for TUI sessions.
@@ -64,15 +68,23 @@ export interface PromptPreferences {
  *
  * The single entry the `LocalUserAuthorizer` calls; keeps the mode dispatch in
  * one place so the fallback and the inline component never both render.
+ *
+ * It is therefore also the one place that knows which surface the human
+ * answered on, so it is where the decision is attributed to that surface
+ * (#726). Having the dialog model and the fallback each name themselves would
+ * be two sites that must agree with this branch.
  */
-export function requestPermissionDecision(
+export async function requestPermissionDecision(
   view: PermissionPromptView,
   title: string,
   payload: PromptPayload,
   options?: RequestPermissionOptions,
 ): Promise<PermissionPromptDecision> {
   if (view.mode === "tui") {
-    return presentInlinePermissionPrompt(view, title, payload, options);
+    return attributeToHuman(
+      await presentInlinePermissionPrompt(view, title, payload, options),
+      "dialog",
+    );
   }
   // The fallback renders once and cannot re-render, so it neither paints nor
   // offers an expansion; it substitutes a nominal width for the terminal size
@@ -81,12 +93,23 @@ export function requestPermissionDecision(
     ...view.budget,
     width: FALLBACK_RENDER_WIDTH,
   });
-  return requestPermissionDecisionFromUi(
-    view.ui,
-    title,
-    rendered.lines.join("\n"),
-    options,
+  return attributeToHuman(
+    await requestPermissionDecisionFromUi(
+      view.ui,
+      title,
+      rendered.lines.join("\n"),
+      options,
+    ),
+    "select",
   );
+}
+
+function attributeToHuman(
+  decision: UnattributedDecision,
+  via: UserDecisionSurface,
+): PermissionPromptDecision {
+  const decidedBy: DecisionSource = { kind: "user", via };
+  return { ...decision, decidedBy };
 }
 
 /** The width the `select`/`input` fallback renders against. */
@@ -104,11 +127,12 @@ const OPTION_LABELS: Record<PromptKey, string> = {
   y: "Yes",
   s: DEFAULT_SESSION_LABEL,
   f: DEFAULT_FOREVER_LABEL,
+  b: "Yes, for this session in both directions",
   n: "No",
   r: "No, provide reason",
 };
 
-const OPTION_ORDER: readonly PromptKey[] = ["y", "s", "f", "n", "r"];
+const OPTION_ORDER: readonly PromptKey[] = ["y", "s", "f", "b", "n", "r"];
 
 /** Fixed chrome rows in the expanded pager: title, two blanks, hint. */
 const EXPANDED_CHROME_ROWS = 5;
@@ -120,14 +144,15 @@ export function presentInlinePermissionPrompt(
   title: string,
   payload: PromptPayload,
   options?: RequestPermissionOptions,
-): Promise<PermissionPromptDecision> {
+): Promise<UnattributedDecision> {
   const config: PromptModelConfig = {
     doublePressToConfirm: view.doublePressToConfirm,
     sessionLabel: options?.sessionLabel ?? DEFAULT_SESSION_LABEL,
     foreverLabel: options?.foreverLabel ?? DEFAULT_FOREVER_LABEL,
+    widthLabel: options?.sessionWidth?.label,
     sessionScope: options?.sessionScope,
   };
-  return view.ui.custom<PermissionPromptDecision>(
+  return view.ui.custom<UnattributedDecision>(
     (tui, theme, keybindings, done) => {
       const component = new PermissionPromptComponent(
         theme,
@@ -169,7 +194,7 @@ export function presentInlinePermissionPrompt(
 }
 
 /** Normalize an untrusted resolved permission-decision payload. */
-function toPermissionDecision(raw: unknown): PermissionPromptDecision {
+function toPermissionDecision(raw: unknown): UnattributedDecision {
   if (typeof raw === "object" && raw !== null) {
     const r = raw as Record<string, unknown>;
     if (r.approved === true && typeof r.state === "string") {
@@ -213,7 +238,8 @@ function handleToolsExpandAction(
 
 class PermissionPromptComponent implements Component {
   private state: PromptViewState;
-  private reasonBuffer = "";
+  /** The denial-reason line editor, rebuilt each time the step is entered. */
+  private reason: Input;
   /** Whether the operator asked to see the complete request (ADR 0011 §4). */
   private expanded = false;
   /** Scroll offset into the expanded full-request render (pager mode). */
@@ -231,10 +257,33 @@ class PermissionPromptComponent implements Component {
     private readonly budget: RenderBudget,
     private readonly handleAppAction: (data: string) => boolean,
     private readonly requestRender: () => void,
-    private readonly done: (decision: PermissionPromptDecision) => void,
+    private readonly done: (decision: UnattributedDecision) => void,
+    // Fork: the expanded pager bounds the dialog to the terminal height.
     private readonly getTerminalRows: () => number,
   ) {
     this.state = initialPromptState(config);
+    this.reason = this.createReasonEditor();
+  }
+
+  /**
+   * A fresh editor per visit to the reason step.
+   *
+   * The framework editor carries an undo stack and a kill ring, so reusing one
+   * instance would let a reason the operator backed out of be restored into a
+   * later ask.
+   */
+  private createReasonEditor(): Input {
+    const editor = new Input();
+    // Emits pi-tui's zero-width cursor marker, which positions the hardware
+    // cursor for IME composition.
+    editor.focused = true;
+    editor.onSubmit = (draft) => {
+      this.apply({ type: "submitReason", draft });
+    };
+    editor.onEscape = () => {
+      this.apply({ type: "cancel" });
+    };
+    return editor;
   }
 
   invalidate(): void {
@@ -324,25 +373,18 @@ class PermissionPromptComponent implements Component {
     }
   }
 
+  /**
+   * Hand the keystroke to the framework line editor.
+   *
+   * Delegating is what makes the field accept a paste: a paste arrives as one
+   * multi-character chunk wrapped in bracketed-paste markers, which the editor
+   * understands and a per-character reader cannot. Submit and cancel come back
+   * through the editor's callbacks, so the decision model still owns them.
+   */
   private handleReasonInput(data: string): void {
-    if (matchesKey(data, "enter")) {
-      this.apply({ type: "submitReason", draft: this.reasonBuffer });
-      return;
-    }
-    if (matchesKey(data, "escape")) {
-      this.reasonBuffer = "";
-      this.apply({ type: "cancel" });
-      return;
-    }
-    if (matchesKey(data, "backspace")) {
-      this.reasonBuffer = this.reasonBuffer.slice(0, -1);
-      this.requestRender();
-      return;
-    }
-    if (isPrintable(data)) {
-      this.reasonBuffer += data;
-      this.requestRender();
-    }
+    this.reason.handleInput(collapsePastedNewlines(data));
+    // The editor mutates its own buffer silently; only the dialog can repaint.
+    this.requestRender();
   }
 
   private toEvent(data: string): PromptEvent | undefined {
@@ -359,7 +401,9 @@ class PermissionPromptComponent implements Component {
       return { type: "cancel" };
     }
     if (this.state.step === "decision") {
-      const key = OPTION_ORDER.find((option) => matchesKey(data, option));
+      const key = visibleOptionKeys(this.config).find((option) =>
+        matchesKey(data, option),
+      );
       if (key) {
         return { type: "hotkey", key };
       }
@@ -374,7 +418,7 @@ class PermissionPromptComponent implements Component {
       return;
     }
     if (outcome.state.step === "reason" && this.state.step !== "reason") {
-      this.reasonBuffer = "";
+      this.reason = this.createReasonEditor();
     }
     if (outcome.state.step !== "decision") {
       // Reason and scope steps render the compact ask; leave the pager.
@@ -391,13 +435,8 @@ class PermissionPromptComponent implements Component {
     }
     const ask = this.renderAsk(width);
     const lines = [this.theme.fg("accent", this.title), ...ask.lines, ""];
-    for (const key of OPTION_ORDER) {
-      const label =
-        key === "s"
-          ? this.config.sessionLabel
-          : key === "f"
-            ? this.config.foreverLabel
-            : OPTION_LABELS[key];
+    for (const key of visibleOptionKeys(this.config)) {
+      const label = this.labelFor(key);
       const selected = this.state.highlightedKey === key;
       const marker = selected ? "▶" : " ";
       const row = `${marker} (${key}) ${label}`;
@@ -448,7 +487,7 @@ class PermissionPromptComponent implements Component {
         `↑/↓ scroll · ${this.scrollOffset + 1}/${this.lastExpandedTotal}`,
       );
     }
-    parts.push("y yes · s session · f forever · n no · r reason");
+    parts.push("y yes · s session · f forever · b both · n no · r reason");
     parts.push("esc back · ctrl+o collapse");
     return this.theme.fg("muted", parts.join(" · "));
   }
@@ -491,12 +530,26 @@ class PermissionPromptComponent implements Component {
     return true;
   }
 
+  /**
+   * The row label for a key: the two session options carry ask-supplied text
+   * naming what they grant, and the rest are fixed. Fork: `f` (forever) also
+   * carries an ask-supplied label when the descriptor suggests a pattern.
+   */
+  private labelFor(key: PromptKey): string {
+    if (key === "s") return this.config.sessionLabel;
+    if (key === "f") return this.config.foreverLabel;
+    if (key === "b") return this.config.widthLabel ?? OPTION_LABELS.b;
+    return OPTION_LABELS[key];
+  }
+
   private renderReason(width: number): string[] {
     const lines = [
       this.theme.fg("accent", this.title),
       ...this.renderAsk(width).lines,
       "",
-      `Reason (required): ${this.reasonBuffer}\u2588`,
+      "Reason (required):",
+      // Exactly one row, whatever its length: the editor scrolls horizontally.
+      ...this.reason.render(width),
     ];
     if (this.state.reasonError) {
       lines.push(this.theme.fg("error", this.state.reasonError));
@@ -529,12 +582,4 @@ class PermissionPromptComponent implements Component {
     lines.push(this.theme.fg("muted", "↑/↓ move · enter confirm · esc back"));
     return lines;
   }
-}
-
-function isPrintable(data: string): boolean {
-  if (data.length !== 1) {
-    return false;
-  }
-  const code = data.charCodeAt(0);
-  return code >= 0x20 && code !== 0x7f;
 }

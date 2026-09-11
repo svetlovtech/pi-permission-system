@@ -1,13 +1,35 @@
-import type { PermissionPromptDecision } from "#src/authority/permission-dialog";
+import type { ReviewLogger } from "#src/logging/session-logger";
+import type { PromptPayload } from "#src/presentation/prompt-payload";
+import { renderReviewLogFacts } from "#src/presentation/review-log-renderer";
+import type { SessionGrantWidth } from "#src/session/approval-grant";
+import type { TerminalAuthorizer } from "./authorizer";
+import type { DecisionSource } from "./decision-source";
+import type { PermissionPromptDecision } from "./permission-dialog";
 import type {
   ForwardedAccessFacts,
   ForwardedSessionApproval,
-} from "#src/authority/permission-forwarding";
-import type { PromptPayload } from "#src/presentation/prompt-payload";
-import type { ReviewLogger } from "#src/session-logger";
-import type { TerminalAuthorizer } from "./authorizer";
+} from "./permission-forwarding";
 
 export type PermissionReviewSource = "tool_call" | "skill_input" | "skill_read";
+
+/**
+ * The width a decision's session grant was recorded at, or `undefined` when it
+ * granted nothing for the session.
+ *
+ * Absent means "proven" everywhere else this value travels, but the review log
+ * is read rather than consumed, so a session-granting entry states its width
+ * explicitly instead of leaving the reader to know the default (#813).
+ */
+function recordedGrantWidth(
+  decision: PermissionPromptDecision,
+): SessionGrantWidth | undefined {
+  const grantsForSession =
+    decision.state === "approved_for_session" ||
+    decision.state === "approved_for_serving_session";
+  return grantsForSession
+    ? (decision.sessionGrantWidth ?? "proven")
+    : undefined;
+}
 
 /**
  * Provenance of a forwarded ask: who is really asking, one hop below.
@@ -27,13 +49,13 @@ export interface PromptPermissionDetails {
   requestId: string;
   source: PermissionReviewSource;
   agentName: string | null;
-  message: string;
   /**
    * The complete structured description of this ask (ADR 0011 §2).
    *
    * Required: every ask carries one, and the type is what guarantees it rather
-   * than a convention each gate has to remember. `message` is a render over it
-   * for the duration of the transition, so the two cannot disagree.
+   * than a convention each gate has to remember. Every consumer — the dialog,
+   * the wire, the broadcast, the review log, the agent-facing denial text — is
+   * a render over it, so no two of them can disagree.
    */
   payload: PromptPayload;
   toolCallId?: string;
@@ -132,6 +154,8 @@ export class PermissionPrompter implements PermissionPrompterApi {
           ? "confirmation_unavailable"
           : decision.state,
         denialReason: decision.denialReason,
+        decidedBy: decision.decidedBy,
+        sessionGrantWidth: recordedGrantWidth(decision),
       },
     );
 
@@ -140,18 +164,28 @@ export class PermissionPrompter implements PermissionPrompterApi {
 
   // ── Private helpers ──────────────────────────────────────────────────────
 
+  /**
+   * The `waiting` entry carries no `decidedBy` — nothing has decided yet, and
+   * a `null` there would read as "decided by nobody" rather than "not yet".
+   */
   private writeReviewEntry(
     event: string,
     details: PromptPermissionDetails & {
       resolution?: string;
       denialReason?: string;
+      decidedBy?: DecisionSource;
+      sessionGrantWidth?: SessionGrantWidth;
     },
   ): void {
     this.deps.logger.review(event, {
+      ...(details.decidedBy ? { decidedBy: details.decidedBy } : {}),
+      ...(details.sessionGrantWidth
+        ? { sessionGrantWidth: details.sessionGrantWidth }
+        : {}),
       requestId: details.requestId,
       source: details.source,
       agentName: details.agentName,
-      message: details.message,
+      ...renderReviewLogFacts(details.payload),
       toolCallId: details.toolCallId ?? null,
       toolName: details.toolName ?? null,
       skillName: details.skillName ?? null,

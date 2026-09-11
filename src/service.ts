@@ -1,25 +1,32 @@
 /**
- * Cross-extension service accessor backed by `Symbol.for()` on `globalThis`.
+ * Cross-extension service accessors backed by `Symbol.for()` on `globalThis`.
  *
  * `Symbol.for()` is process-global by spec, so it survives jiti's per-extension
  * module isolation (`moduleCache: false`). A consumer doing
- * `import("@gotgenes/pi-permission-system")` gets a fresh module copy, but
- * `getPermissionsService()` reads from the same `globalThis` slot the provider
- * wrote to — enabling direct, synchronous, type-safe function calls.
+ * `import("@gotgenes/pi-permission-system")` gets a fresh module copy, but the
+ * accessors here read from the same `globalThis` slots the provider wrote to —
+ * enabling direct, synchronous, type-safe function calls.
  *
- * Best practice: call `getPermissionsService()` per use rather than caching the
- * reference — this ensures resilience across `/reload` and load-order edge cases.
+ * The slot is a session-keyed map, because one process can host several
+ * **nodes** (one Pi session runtime each — a root session and its in-process
+ * subagent children all load their own instance of this extension). Every node
+ * writes under its own session id, and `getPermissionsService(sessionId)`
+ * resolves the service whose registries that node's own gates and chain read
+ * (ADR 0012 decision 2).
+ *
+ * Best practice: resolve per use rather than caching the reference — this
+ * ensures resilience across `/reload` and load-order edge cases.
  */
 
-import type { Authorizer } from "./authority/authorizer";
-import type { ToolAccessExtractor } from "./tool-access-extractor-registry";
-import type { ToolInputFormatter } from "./tool-input-formatter-registry";
+import type { Authorizer } from "#src/authority/authorizer";
+import type { ToolAccessExtractor } from "#src/tool-input/tool-access-extractor-registry";
+import type { ToolInputFormatter } from "#src/tool-input/tool-input-formatter-registry";
 import type { PermissionCheckResult, PermissionState } from "./types";
 
 export type {
   Authorizer,
   AuthorizerVerdict,
-} from "./authority/authorizer";
+} from "#src/authority/authorizer";
 
 /**
  * The narrow review-log seam handed to a chain link at `authorize` time
@@ -36,23 +43,36 @@ export interface AuthorizerLog {
   review(event: string, details?: Record<string, unknown>): void;
   debug(event: string, details?: Record<string, unknown>): void;
 }
-export type { PromptPermissionDetails } from "./authority/permission-prompter";
+export type { PromptPermissionDetails } from "#src/authority/permission-prompter";
+// The declaration bundle already inlines these through `PromptPermissionDetails`
+// and `PermissionUiPromptEvent`; the named exports are what a consumer needs to
+// annotate a variable of their own.
+export type {
+  PromptAnnotation,
+  PromptEvidence,
+  PromptPayload,
+  PromptPayloadKind,
+  PromptRequester,
+  PromptRequestFacts,
+} from "#src/presentation/prompt-payload";
 export type {
   ForwardedPromptContext,
   PermissionDecisionEvent,
   PermissionsReadyEvent,
   PermissionUiPromptEvent,
   PermissionUiPromptSource,
-} from "./permission-events";
+} from "#src/service/permission-events";
 export {
   PERMISSIONS_DECISION_CHANNEL,
   PERMISSIONS_READY_CHANNEL,
   PERMISSIONS_UI_PROMPT_CHANNEL,
-} from "./permission-events";
+} from "#src/service/permission-events";
 export type { PermissionCheckResult, PermissionState, ToolInputFormatter };
 
-/** Process-global key for the service slot. */
-const SERVICE_KEY = Symbol.for("@gotgenes/pi-permission-system:service");
+/** Process-global key for the session-keyed service map (ADR 0012 decision 2). */
+const SESSION_SERVICES_KEY = Symbol.for(
+  "@gotgenes/pi-permission-system:session-services",
+);
 
 /**
  * The narrow, read-only projection of {@link PermissionsService}: answer a
@@ -79,12 +99,16 @@ export interface PermissionQuery {
   ): PermissionCheckResult;
 
   /**
-   * Query the tool-level permission state for pre-filtering tools before
-   * creating a child session.
+   * Query a surface's catch-all permission state — its blanket policy.
    *
    * Returns `"deny"` | `"allow"` | `"ask"` based on the composed policy.
    * Does not consider command-level rules (e.g. per-bash-command patterns) —
    * use `checkPermission` for runtime invocation gates.
+   *
+   * This is **not** the question to ask when pre-filtering a tool list: a
+   * partially permissive surface such as `bash: {"*": "deny", "git *": "ask"}`
+   * answers `"deny"` here while `git status` would still be asked about. Use
+   * {@link PermissionsService.isToolFullyDenied} for that.
    *
    * @param toolName  - Tool name (e.g. `"bash"`, `"read"`, `"my-extension:tool"`).
    * @param agentName - Optional agent name for per-agent policy resolution.
@@ -93,13 +117,37 @@ export interface PermissionQuery {
 }
 
 /**
- * Public interface exposed to other extensions via `getPermissionsService()`.
+ * Public interface exposed to other extensions via
+ * {@link getPermissionsService}.
+ *
+ * Each instance belongs to one node, and its three registration surfaces are
+ * read by that node alone: extractors and formatters by its own gates, chain
+ * links by its own chain. Resolve the service of the node whose behavior you
+ * mean to affect.
  *
  * `checkPermission` takes a surface + optional value + optional agent name,
  * and delegates to `PermissionManager.checkPermission()` with current session
  * rules internally.
  */
 export interface PermissionsService extends PermissionQuery {
+  /**
+   * Whether every value under a tool's surface resolves to `deny`.
+   *
+   * This is the question to ask before withholding a tool from a child
+   * session's tool list, and it is not `getToolPermission`: that reports the
+   * surface's own catch-all, so a partially permissive surface such as
+   * `bash: {"*": "deny", "git *": "ask"}` reads as `"deny"` while `git status`
+   * would still be asked about.
+   *
+   * Rule ordering is honored (last-match-wins), so an exception written *after*
+   * a `deny` catch-all keeps the tool reachable and one written *before* it
+   * does not.
+   *
+   * @param toolName  - Tool name (e.g. `"bash"`, `"read"`, `"my-extension:tool"`).
+   * @param agentName - Optional agent name for per-agent policy resolution.
+   */
+  isToolFullyDenied(toolName: string, agentName?: string): boolean;
+
   /**
    * Register a custom preview formatter for a specific tool name.
    *
@@ -143,6 +191,32 @@ export interface PermissionsService extends PermissionQuery {
   ): () => void;
 
   /**
+   * The access extractor registered on this node for `toolName`, or
+   * `undefined` when it has none.
+   *
+   * This is the read face of a **fact-shaping** registry, and unlike the
+   * authority surfaces it is meant to be read across a node boundary: an
+   * extractor produces a fact about a call (the path it touches) and decides
+   * nothing, so an in-process child whose own registry has no entry may
+   * resolve an ancestor node's service and use its answer to complete the
+   * child's own fact-gathering (ADR 0012 decision 1).
+   *
+   * The same does not hold for {@link registerAuthorizer}: a link produces a
+   * verdict, and live authority converges at the adjudicating node (ADR 0007
+   * §7). There is deliberately no reader for it.
+   */
+  getToolAccessExtractor(toolName: string): ToolAccessExtractor | undefined;
+
+  /**
+   * The preview formatter registered on this node for `toolName`, or
+   * `undefined` when it has none.
+   *
+   * Fact-shaping, and cross-node readable for the same reason as
+   * {@link getToolAccessExtractor}.
+   */
+  getToolInputFormatter(toolName: string): ToolInputFormatter | undefined;
+
+  /**
    * Register a named live-authority chain link (ADR 0007 §4).
    *
    * A link reviews an `ask` and returns `allow` / `deny` (with an optional
@@ -171,45 +245,107 @@ export interface PermissionsService extends PermissionQuery {
 }
 
 /**
- * Store a `PermissionsService` on `globalThis` so other extensions can
- * retrieve it via `getPermissionsService()`.
+ * The process-global map of session id → that node's service, created on first
+ * use.
  *
- * Called at `session_start` by the top-level (parent) instance only — an
- * in-process subagent child skips publishing so it cannot clobber the parent's
- * service. Overwrites any previously published service, which keeps `/reload`
- * working: a reloaded parent re-publishes its fresh service.
+ * Backed by `globalThis` + `Symbol.for()` because each session's
+ * `ResourceLoader` builds its own jiti instance, so a parent and its in-process
+ * child share no module state — only process globals.
  */
-export function publishPermissionsService(service: PermissionsService): void {
-  (globalThis as Record<symbol, unknown>)[SERVICE_KEY] = service;
-}
-
-/**
- * Retrieve the published `PermissionsService`, or `undefined` if the
- * permission-system extension has not loaded (or has been unloaded).
- */
-export function getPermissionsService(): PermissionsService | undefined {
-  return (globalThis as Record<symbol, unknown>)[SERVICE_KEY] as
-    | PermissionsService
+function sessionServices(): Map<string, PermissionsService> {
+  const store = globalThis as Record<symbol, unknown>;
+  const existing = store[SESSION_SERVICES_KEY] as
+    | Map<string, PermissionsService>
     | undefined;
+  if (existing) {
+    return existing;
+  }
+  const services = new Map<string, PermissionsService>();
+  store[SESSION_SERVICES_KEY] = services;
+  return services;
 }
 
 /**
- * Remove `service` from `globalThis`, but only when the current slot still
- * holds it (identity compare-and-delete).
+ * Publish `service` as the service of the node whose session is `sessionId`
+ * (ADR 0012 decision 2 — node-locality).
  *
- * Called during `session_shutdown` to avoid stale references after the
- * extension is torn down. Scoping the delete to the publishing instance keeps
- * two cases correct:
- *
- * - An in-process subagent child never published the parent's service, so its
- *   shutdown is a no-op and the parent's slot survives.
- * - A superseded `/reload` generation no longer owns the slot, so its late
- *   shutdown cannot wipe the new generation's freshly published service.
+ * Every node publishes under its own key, including an in-process subagent
+ * child, so there is nothing to clobber: a child's sibling extension registers
+ * an extractor, formatter, or chain link into the registry the child's own
+ * gates and chain read.
  */
-export function unpublishPermissionsService(service: PermissionsService): void {
-  if (getPermissionsService() !== service) {
+export function publishPermissionsService(
+  sessionId: string,
+  service: PermissionsService,
+): void {
+  sessionServices().set(sessionId, service);
+}
+
+/**
+ * Retrieve the service belonging to the node whose session is `sessionId`, or
+ * `undefined` when that node has published none.
+ *
+ * This is the supported way to obtain a node's service, for registration and
+ * for policy queries alike. Take `sessionId` from the `permissions:ready`
+ * payload (or from `ctx.sessionManager.getSessionId()` inside your own session
+ * handler), and resolve per use rather than caching the reference.
+ *
+ * A caller the type checker cannot reach — JavaScript, or a consumer compiled
+ * against an earlier major — may still call this with no argument. That answers
+ * `undefined` rather than another node's service, and warns once so the missing
+ * registration is not silent.
+ */
+export function getPermissionsService(
+  sessionId: string,
+): PermissionsService | undefined {
+  if (typeof sessionId !== "string") {
+    warnMissingSessionId();
+    return undefined;
+  }
+  return sessionServices().get(sessionId);
+}
+
+const MISSING_SESSION_ID_WARNING =
+  "getPermissionsService() was called without a session id and answered " +
+  "undefined. It resolves the service of one node, so it needs the sessionId " +
+  "from the permissions:ready payload: getPermissionsService(sessionId). See " +
+  "https://github.com/gotgenes/pi-packages/blob/main/packages/pi-permission-system/docs/cross-extension-api.md";
+
+/**
+ * Warned at most once per module copy, like the deprecation guard above, so a
+ * consumer polling the locator every turn reports the defect once.
+ *
+ * Deliberately not a `DeprecationWarning`: an operator who silences those with
+ * `--no-deprecation` still needs to hear that a registration never landed.
+ */
+let warnedMissingSessionId = false;
+
+function warnMissingSessionId(): void {
+  if (warnedMissingSessionId) {
     return;
   }
-  // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- Symbol-keyed global property; Map.delete() is not applicable
-  delete (globalThis as Record<symbol, unknown>)[SERVICE_KEY];
+  warnedMissingSessionId = true;
+  process.emitWarning(MISSING_SESSION_ID_WARNING, {
+    type: "Warning",
+    code: "PI_PERMISSION_SYSTEM_WARN0001",
+  });
+}
+
+/**
+ * Remove the `sessionId` entry, but only when it still holds `service`
+ * (identity compare-and-delete).
+ *
+ * Called during `session_shutdown` to avoid stale references after the node is
+ * torn down. Scoping the delete to the publishing instance keeps a superseded
+ * `/reload` generation's late shutdown from wiping the new generation's freshly
+ * published service.
+ */
+export function unpublishPermissionsService(
+  sessionId: string,
+  service: PermissionsService,
+): void {
+  const services = sessionServices();
+  if (services.get(sessionId) === service) {
+    services.delete(sessionId);
+  }
 }

@@ -1,31 +1,27 @@
+import type { PathFlavor } from "#src/path/path-flavor";
 import {
-  isRegisteredSubagentChild,
   isSubagentExecutionContext,
   type SubagentDetectionContext,
-} from "#src/authority/subagent-context";
-import type { SubagentSessionRegistry } from "#src/authority/subagent-registry";
-import type { PathFlavor } from "#src/path/path-flavor";
+} from "./subagent-context";
+import type { SubagentSessionRegistry } from "./subagent-registry";
 
 /**
  * Narrow seam for the ask-path consumers: "is the current session a subagent?"
  *
- * `selectAuthorizer`/`AuthorizerSelection` and `ForwardingManager` depend on
- * this single-method view so their unit tests inject a one-field fake without
- * casts. It is the Authorizer-selection predicate the Phase 9 spine consumes.
+ * `selectAuthorizer`/`AuthorizerSelection` depends on this single-method view so
+ * its unit tests inject a one-field fake without casts. It is the
+ * Authorizer-selection predicate the Phase 9 spine consumes.
+ *
+ * It answers "is this process a child", which is **not** "should this node relay
+ * rather than decide". A UI host answers `true` here whenever its process
+ * carries a parent-session marker — a spawner may export one from the root so
+ * the children it launches inherit it. No consumer may read it as a relay
+ * decision: `selectAuthorizer` relays a node with a UI only when a forwarding
+ * target resolves *and* that target is serving (#909), and serving eligibility
+ * does not consult this predicate at all (#907).
  */
 export interface SubagentDetector {
   isSubagent(ctx: SubagentDetectionContext): boolean;
-}
-
-/**
- * Narrow seam for the service-publication guard (#302): "is the current
- * session a registered in-process child?"
- *
- * `PermissionServiceLifecycle` depends on this single-method view so a
- * registered child never publishes over its parent's process-global slot.
- */
-export interface RegisteredChildDetector {
-  isRegisteredChild(ctx: SubagentDetectionContext): boolean;
 }
 
 /** Composition-root inputs for {@link SubagentDetection}. */
@@ -44,9 +40,7 @@ export interface SubagentDetectionDeps {
  * individually. Delegates to the pure detection functions in
  * {@link ./subagent-context}, holding only the deps.
  */
-export class SubagentDetection
-  implements SubagentDetector, RegisteredChildDetector
-{
+export class SubagentDetection implements SubagentDetector {
   constructor(private readonly deps: SubagentDetectionDeps) {}
 
   isSubagent(ctx: SubagentDetectionContext): boolean {
@@ -56,11 +50,5 @@ export class SubagentDetection
       this.deps.flavor,
       this.deps.registry,
     );
-  }
-
-  isRegisteredChild(ctx: SubagentDetectionContext): boolean {
-    return this.deps.registry
-      ? isRegisteredSubagentChild(ctx, this.deps.registry)
-      : false;
   }
 }

@@ -1,9 +1,13 @@
-import type { ExternalPathDisclosure } from "#src/denial-messages";
-import type {
-  PromptEvidence,
-  PromptPayload,
-} from "#src/presentation/prompt-payload";
-import { localRequester } from "#src/presentation/prompt-payload";
+import type { PromptEvidence, PromptPayload } from "./prompt-payload";
+import { localRequester } from "./prompt-payload";
+
+/** A displayed external path paired with its resolved target, when distinct. */
+export interface ExternalPathDisclosure {
+  /** The path as displayed (typed for tools, lexical-absolute for bash). */
+  path: string;
+  /** The canonical symlink-resolved target; present only when it differs. */
+  resolvedPath?: string;
+}
 
 /** The facts a path-shaped gate holds when it raises an ask. */
 interface PathAskFacts {
@@ -12,11 +16,17 @@ interface PathAskFacts {
   pathValue: string;
   agentName: string | null;
   matchedPattern?: string;
+  /**
+   * The surface that decided — a directional member when the tool's identity
+   * proved a direction, the bare family otherwise. Distinct from the payload
+   * `kind`, which stays coarse so renderer dispatch is untouched.
+   */
+  surface: string;
 }
 
-/** A tool ask gated by an explicit `path` rule. */
+/** A tool ask gated by an explicit `path`-family rule. */
 export function buildPathAskPayload(facts: PathAskFacts): PromptPayload {
-  return pathPayload("path", "path", facts, []);
+  return pathPayload("path", facts, []);
 }
 
 /** The facts the external-directory gate adds: the boundary and the alias. */
@@ -31,7 +41,7 @@ interface ExternalDirectoryAskFacts extends PathAskFacts {
 export function buildExternalDirectoryAskPayload(
   facts: ExternalDirectoryAskFacts,
 ): PromptPayload {
-  return pathPayload("external_directory", "external_directory", facts, [
+  return pathPayload("external_directory", facts, [
     ...resolvedAliasEvidence(facts.resolvedPath),
     workingDirectoryEvidence(facts.cwd),
   ]);
@@ -46,6 +56,12 @@ interface BashExternalDirectoryAskFacts {
   agentName: string | null;
   toolName: string;
   matchedPattern?: string;
+  /**
+   * The surface that decided — a directional member when the deciding path's
+   * effect was proven, the bare family otherwise. Distinct from the payload
+   * `kind`, which stays coarse so renderer dispatch is untouched.
+   */
+  surface: string;
 }
 
 /** A bash ask whose command references paths outside the working directory. */
@@ -56,7 +72,7 @@ export function buildBashExternalDirectoryAskPayload(
     kind: "bash_external_directory",
     request: {
       requester: localRequester(facts.agentName),
-      surface: "external_directory",
+      surface: facts.surface,
       toolName: facts.toolName,
       invokedToolName: null,
       value: facts.command,
@@ -80,7 +96,6 @@ export function buildBashExternalDirectoryAskPayload(
  */
 function pathPayload(
   kind: "path" | "external_directory",
-  surface: string,
   facts: PathAskFacts,
   evidence: PromptEvidence[],
 ): PromptPayload {
@@ -88,7 +103,7 @@ function pathPayload(
     kind,
     request: {
       requester: localRequester(facts.agentName),
-      surface,
+      surface: facts.surface,
       toolName: facts.toolName,
       invokedToolName: null,
       value: facts.pathValue,

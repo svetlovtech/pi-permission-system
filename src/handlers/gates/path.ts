@@ -1,13 +1,16 @@
+import { capabilitySurfaceForTool } from "#src/access-intent/path-surfaces";
 import { getToolInputPath } from "#src/access-intent/tool-input-path";
-import type { PathNormalizer } from "#src/path-normalizer";
-import type { ScopedPermissionResolver } from "#src/permission-resolver";
-import { renderLegacyMessage } from "#src/presentation/legacy-message";
+import type { PathNormalizer } from "#src/path/path-normalizer";
+import type { ScopedPermissionResolver } from "#src/policy/permission-resolver";
 import { buildPathAskPayload } from "#src/presentation/path-ask-payload";
-import { SessionApproval } from "#src/session-approval";
-import { deriveApprovalPattern } from "#src/session-rules";
-import type { ToolAccessExtractorLookup } from "#src/tool-access-extractor-registry";
+import { SessionApproval } from "#src/session/session-approval";
+import type { ToolAccessExtractorLookup } from "#src/tool-input/tool-access-extractor-registry";
 import type { GateDescriptor, GateResult } from "./descriptor";
-import { accessFactsFromPath } from "./helpers";
+import {
+  accessFactsFromPath,
+  buildPathGateLogContext,
+  buildPathGatePromptDetails,
+} from "./helpers";
 import type { ToolCallContext } from "./types";
 
 /**
@@ -24,8 +27,17 @@ export function describePathGate(
   normalizer: PathNormalizer,
   extractors?: ToolAccessExtractorLookup,
 ): GateResult {
-  const filePath = getToolInputPath(tcc.toolName, tcc.input, extractors);
+  const { path: filePath, source: pathSource } = getToolInputPath(
+    tcc.toolName,
+    tcc.input,
+    extractors,
+  );
   if (!filePath) return null;
+
+  // The narrowest `path`-family surface this tool's identity proves. A tool
+  // that proves nothing narrower emits the bare family name, which the
+  // resolver folds over both directional members (ADR 0013 §10).
+  const surface = capabilitySurfaceForTool("path", tcc.toolName);
 
   // Emit an access-path intent so the resolver matches the lexical aliases
   // *and* the canonical (symlink-resolved) form, the same set
@@ -33,7 +45,7 @@ export function describePathGate(
   const accessPath = normalizer.forPath(filePath);
   const check = resolver.resolve({
     kind: "access-path",
-    surface: "path",
+    surface,
     path: accessPath,
     agentName: tcc.agentName ?? undefined,
   });
@@ -47,44 +59,29 @@ export function describePathGate(
 
   // Derive the approval pattern from the lexical absolute form so it matches
   // the policy values a later call produces.
-  const pattern = deriveApprovalPattern(accessPath.value());
+  const pattern = normalizer.approvalPatternFor(accessPath);
 
   const payload = buildPathAskPayload({
     toolName: tcc.toolName,
     pathValue: filePath,
     agentName: tcc.agentName,
     matchedPattern: check.matchedPattern,
+    surface,
   });
 
   const descriptor: GateDescriptor = {
-    surface: "path",
+    surface,
     input: { path: filePath },
-    denialContext: {
-      kind: "path",
-      toolName: tcc.toolName,
-      pathValue: filePath,
-      agentName: tcc.agentName ?? undefined,
-    },
-    sessionApproval: SessionApproval.single("path", pattern),
-    promptDetails: {
-      source: "tool_call",
-      agentName: tcc.agentName,
-      message: renderLegacyMessage(payload),
-      payload,
-      toolCallId: tcc.toolCallId,
-      toolName: tcc.toolName,
-      path: filePath,
-      accessIntent: accessFactsFromPath("path", accessPath),
-    },
-    logContext: {
-      source: "tool_call",
-      toolCallId: tcc.toolCallId,
-      toolName: tcc.toolName,
-      agentName: tcc.agentName,
-      path: filePath,
-    },
+    payload,
+    sessionApproval: SessionApproval.single(surface, pattern),
+    promptDetails: buildPathGatePromptDetails(
+      tcc,
+      filePath,
+      accessFactsFromPath(surface, accessPath),
+    ),
+    logContext: buildPathGateLogContext(tcc, filePath, pathSource),
     decision: {
-      surface: "path",
+      surface,
       value: filePath,
     },
     preCheck: check,

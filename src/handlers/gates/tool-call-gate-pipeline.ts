@@ -1,30 +1,29 @@
-import type { AccessPath } from "#src/access-intent/access-path";
 import { BashProgram } from "#src/access-intent/bash/program";
 import { getPathBearingToolPath } from "#src/access-intent/tool-input-path";
 import {
   resolveShellInvocation,
   type ShellInvocation,
 } from "#src/access-intent/tool-kind";
-import type { ShellToolsConfig } from "#src/config-schema";
-import type { PathNormalizer } from "#src/path-normalizer";
-import type { ScopedPermissionResolver } from "#src/permission-resolver";
-import type { SkillPromptEntry } from "#src/skill-prompt-sanitizer";
-import type { ToolAccessExtractorLookup } from "#src/tool-access-extractor-registry";
-import type { ToolInputFormatterLookup } from "#src/tool-input-formatter-registry";
+import type { ShellToolsConfig } from "#src/config/config-schema";
+import type { SkillPromptEntry } from "#src/exposure/skill-prompt-sanitizer";
+import type { PathNormalizer } from "#src/path/path-normalizer";
+import type { ScopedPermissionResolver } from "#src/policy/permission-resolver";
+import type { ToolAccessExtractorLookup } from "#src/tool-input/tool-access-extractor-registry";
+import type { ToolInputFormatterLookup } from "#src/tool-input/tool-input-formatter-registry";
 import {
   ToolPreviewFormatter,
   type ToolPreviewFormatterOptions,
-} from "#src/tool-preview-formatter";
+} from "#src/tool-input/tool-preview-formatter";
 import type { PermissionCheckResult } from "#src/types";
 import { resolveBashCommandCheck } from "./bash-command";
 import { describeBashExternalDirectoryGate } from "./bash-external-directory";
 import { describeBashPathGate } from "./bash-path";
-import type { GateResult } from "./descriptor";
+import { type GateResult, orderDenyFirst } from "./descriptor";
 import { describeExternalDirectoryGate } from "./external-directory";
 import { describePathGate } from "./path";
 import type { GateRunner } from "./runner";
 import { describeSkillReadGate } from "./skill-read";
-import { describeToolGate } from "./tool";
+import { describeToolGate, type ToolPathAccess } from "./tool";
 import type { GateOutcome, ToolCallContext } from "./types";
 
 /**
@@ -63,7 +62,8 @@ export interface ToolCallGateInputs {
  * - `ToolPreviewFormatter` construction from `getToolPreviewLimits()`
  * - infrastructure-dir list from `getInfrastructureReadDirs()`
  * - all six gate producers in their prescribed order
- * - the run loop that returns the first block outcome, or allow
+ * - the run loop, which runs an unconditionally denying gate ahead of the
+ *   rest and returns the first block outcome, or allow
  */
 export class ToolCallGatePipeline {
   constructor(
@@ -115,10 +115,16 @@ export class ToolCallGatePipeline {
           normalizer,
           this.customExtractors,
         ),
-      () => describeBashExternalDirectoryGate(tcc, bashProgram, this.resolver),
-      () => describeBashPathGate(tcc, bashProgram, this.resolver),
+      () =>
+        describeBashExternalDirectoryGate(
+          tcc,
+          bashProgram,
+          this.resolver,
+          normalizer,
+        ),
+      () => describeBashPathGate(tcc, bashProgram, this.resolver, normalizer),
       () => {
-        const { toolCheck, accessPath } = this.resolvePerToolCheck(
+        const { toolCheck, pathAccess } = this.resolvePerToolCheck(
           tcc,
           shell,
           bashProgram,
@@ -128,7 +134,7 @@ export class ToolCallGatePipeline {
           tcc,
           toolCheck,
           formatter,
-          accessPath,
+          pathAccess,
           shell,
         );
         toolDescriptor.preCheck = toolCheck;
@@ -136,8 +142,18 @@ export class ToolCallGatePipeline {
       },
     ];
 
+    // Produce every gate before running any of them, so an unconditional deny
+    // on a later gate is known before an earlier one suspends the call on an
+    // `ask` nobody's answer could change (#899). Producing is side-effect-free
+    // — all logging and event emission happens inside `runner.run` — and the
+    // loop below already produced every gate on any call it did not block.
+    const gates: GateResult[] = [];
     for (const produce of gateProducers) {
-      const outcome = await runner.run(await produce(), tcc.agentName);
+      gates.push(await produce());
+    }
+
+    for (const gate of orderDenyFirst(gates)) {
+      const outcome = await runner.run(gate, tcc.agentName);
       if (outcome.action === "block") {
         return outcome;
       }
@@ -153,15 +169,16 @@ export class ToolCallGatePipeline {
    * #502); every other tool (and a path-bearing tool with no path) keeps the
    * raw `tool` intent the manager normalizes.
    *
-   * Returns the `AccessPath` alongside the check so `describeToolGate` derives
-   * the session-approval value from `accessPath.value()`.
+   * Returns the resolved path alongside the check, already paired with the
+   * session scope approving it grants — derived here, where the normalizer
+   * lives, rather than inside the gate (#655).
    */
   private resolvePerToolCheck(
     tcc: ToolCallContext,
     shell: ShellInvocation | null,
     bashProgram: BashProgram | null,
     normalizer: PathNormalizer,
-  ): { toolCheck: PermissionCheckResult; accessPath?: AccessPath } {
+  ): { toolCheck: PermissionCheckResult; pathAccess?: ToolPathAccess } {
     if (shell) {
       if (bashProgram) {
         return {
@@ -190,7 +207,10 @@ export class ToolCallGatePipeline {
     if (filePath !== null) {
       const accessPath = normalizer.forPath(filePath);
       return {
-        accessPath,
+        pathAccess: {
+          path: accessPath,
+          approvalPattern: normalizer.approvalPatternFor(accessPath),
+        },
         toolCheck: this.resolver.resolve({
           kind: "access-path",
           surface: tcc.toolName,

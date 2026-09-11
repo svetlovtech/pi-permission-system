@@ -1,15 +1,16 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { PermissionPromptDecision } from "#src/authority/permission-dialog";
 import type { PermissionQuery } from "#src/service";
 import {
-  type Authorizer,
   type AuthorizerSelectionDeps,
+  type NamedAuthorizer,
   type SelectedAuthority,
   selectAuthorizer,
 } from "./authorizer";
 import { composeAuthorizerChain } from "./authorizer-chain";
 import type { AuthorizerLookup } from "./authorizer-registry";
 import { encloseInDelegationEnvelope } from "./delegation-envelope";
+import type { PermissionPromptDecision } from "./permission-dialog";
+import type { PermissionForwardingTarget } from "./permission-forwarding";
 import type {
   PermissionPrompterApi,
   PromptPermissionDetails,
@@ -40,6 +41,27 @@ export interface AskEscalator {
 }
 
 /**
+ * The node's chain role, as a fact a collaborator can read: does this node's
+ * authorizer chain run, or does it relay its asks to a serving node
+ * (ADR 0007 §7)?
+ *
+ * Consumed by the service lifecycle (which broadcasts it on `permissions:ready`
+ * so a sibling extension learns it without knowing what a subagent is) and by
+ * the registration observer (which records a link registered where no chain
+ * runs). Both depend on this single-method view rather than the selection
+ * itself, and neither may re-derive the role from `ctx.hasUI` or
+ * `detection.isSubagent(ctx)`: a node with a UI relays when it names another
+ * session that is draining its inbox, and decides locally otherwise (#909).
+ *
+ * Because the selection is remade on every activation, the answer can change
+ * within one session — a node stops relaying as soon as its declared parent
+ * stops serving.
+ */
+export interface AdjudicationRole {
+  adjudicatesLocally(): boolean;
+}
+
+/**
  * Context-owning selection root for the Authorizer spine.
  *
  * The rewrite of `PromptingGateway`: owns the stored `ExtensionContext`, runs
@@ -52,9 +74,10 @@ export interface AskEscalator {
  * predicate survives (#556 dissolved `canConfirm()`).
  */
 export class AuthorizerSelection
-  implements AskEscalator, AuthorizerSelectionLifecycle
+  implements AskEscalator, AuthorizerSelectionLifecycle, AdjudicationRole
 {
   private authority: SelectedAuthority | null = null;
+  private relayTarget: PermissionForwardingTarget | null = null;
 
   constructor(
     private readonly deps: AuthorizerSelectionDeps & {
@@ -75,7 +98,39 @@ export class AuthorizerSelection
    * activation, so link resolution is deferred to the session's first ask.
    */
   activate(ctx: ExtensionContext): void {
-    this.authority = selectAuthorizer(ctx, this.deps);
+    const authority = selectAuthorizer(ctx, this.deps);
+    this.recordRelayTransition(authority.relayTarget ?? null);
+    this.authority = authority;
+  }
+
+  /**
+   * Record that this node started, stopped, or redirected its relaying.
+   *
+   * `activate` runs on every turn event, so only a change is worth a line: the
+   * pair reads beside the serving node's own
+   * `forwarded_permission.serving_started`/`serving_stopped`, which is what
+   * makes a misdirected relay a one-line diff across the two sessions. A node
+   * that never relays writes nothing at all.
+   */
+  private recordRelayTransition(
+    target: PermissionForwardingTarget | null,
+  ): void {
+    const previous = this.relayTarget;
+    if (previous?.sessionId === target?.sessionId) {
+      return;
+    }
+    this.relayTarget = target;
+    if (previous !== null) {
+      this.deps.logger.review("forwarded_permission.relay_stopped", {
+        targetSessionId: previous.sessionId,
+      });
+    }
+    if (target !== null) {
+      this.deps.logger.review("forwarded_permission.relay_started", {
+        targetSessionId: target.sessionId,
+        channel: target.source,
+      });
+    }
   }
 
   /**
@@ -93,7 +148,7 @@ export class AuthorizerSelection
   private linksFor(
     authority: SelectedAuthority,
     requestId: string,
-  ): Authorizer[] {
+  ): NamedAuthorizer[] {
     const configured = this.deps.getAuthorizerChain();
     if (configured.length === 0) {
       return [];
@@ -123,8 +178,8 @@ export class AuthorizerSelection
   private resolveConfiguredLinks(
     configured: readonly string[],
     requestId: string,
-  ): Authorizer[] {
-    const links: Authorizer[] = [];
+  ): NamedAuthorizer[] {
+    const links: NamedAuthorizer[] = [];
     const resolved: string[] = [];
     for (const name of configured) {
       const authorize = this.deps.authorizerRegistry.get(name);
@@ -136,7 +191,7 @@ export class AuthorizerSelection
         continue;
       }
       resolved.push(name);
-      links.push({ authorize: encloseInDelegationEnvelope(authorize) });
+      links.push({ name, authorize: encloseInDelegationEnvelope(authorize) });
     }
     if (resolved.length > 0) {
       this.deps.logger.review("authorizer_chain_resolved", {
@@ -147,8 +202,24 @@ export class AuthorizerSelection
     return links;
   }
 
+  /**
+   * Whether this node adjudicates its own asks. Implements
+   * {@link AdjudicationRole}.
+   *
+   * Reports `true` with no selection stored — before activation, or after
+   * deactivation. Production never reads it there (`activate` runs inside
+   * `PermissionSession.resetForNewSession`, ahead of every consumer), and
+   * "this node adjudicates" is the fail-soft answer: it tells a sibling to
+   * register, which a relaying node accepts and records rather than refusing
+   * (ADR 0012 decision 4).
+   */
+  adjudicatesLocally(): boolean {
+    return this.authority?.adjudicatesLocally ?? true;
+  }
+
   /** Clear the stored selection. */
   deactivate(): void {
+    this.recordRelayTransition(null);
     this.authority = null;
   }
 

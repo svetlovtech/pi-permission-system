@@ -1,50 +1,69 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, getPackageDir } from "@earendil-works/pi-coding-agent";
-import { warmBashParser } from "./access-intent/bash/parser";
-import { buildResolvedIntentFromMatchValues } from "./access-intent/input-normalizer";
-import { AuthorizerRegistry } from "./authority/authorizer-registry";
-import { AuthorizerSelection } from "./authority/authorizer-selection";
+import { warmBashParser } from "#src/access-intent/bash/parser";
+import { buildResolvedIntentFromMatchValues } from "#src/access-intent/input-normalizer";
+import {
+  AuthorizerRegistry,
+  ObservedAuthorizerRegistrar,
+} from "#src/authority/authorizer-registry";
+import { AuthorizerSelection } from "#src/authority/authorizer-selection";
+import { ChildNodeAudit } from "#src/authority/child-node-audit";
 import {
   ForwardedRequestServer,
   type ServingPolicy,
-} from "./authority/forwarded-request-server";
-import { ForwardingManager } from "./authority/forwarding-manager";
-import { PERMISSION_FORWARDING_TIMEOUT_MS } from "./authority/permission-forwarding";
-import { requestPermissionDecision } from "./authority/permission-prompt-component";
-import { PermissionPrompter } from "./authority/permission-prompter";
-import { getServingSessionRegistry } from "./authority/serving-registry";
-import { SubagentDetection } from "./authority/subagent-detection";
-import { subscribeSubagentLifecycle } from "./authority/subagent-lifecycle-events";
-import { getSubagentSessionRegistry } from "./authority/subagent-registry";
-import { registerBuiltinToolInputFormatters } from "./builtin-tool-input-formatters";
-import { registerPermissionSystemCommand } from "./config-modal";
-import { getGlobalConfigPath } from "./config-paths";
-import { ConfigStore } from "./config-store";
-import { ConfigForeverApprovalRecorder } from "./forever-approval-recorder";
-import { DecisionAudit } from "./decision-audit";
-import { GateDecisionReporter } from "./decision-reporter";
-import { isYoloModeEnabled } from "./extension-config";
-import { computeExtensionPaths } from "./extension-paths";
+} from "#src/authority/forwarded-request-server";
+import {
+  ForwardingLivenessJudge,
+  ServingHeartbeatStore,
+} from "#src/authority/forwarding-liveness";
+import { ForwardingManager } from "#src/authority/forwarding-manager";
+import {
+  AncestorNodes,
+  InheritingToolAccessExtractorLookup,
+  InheritingToolInputFormatterLookup,
+} from "#src/authority/inherited-registrations";
+import { PERMISSION_FORWARDING_TIMEOUT_MS } from "#src/authority/permission-forwarding";
+import { requestPermissionDecision } from "#src/authority/permission-prompt-component";
+import { PermissionPrompter } from "#src/authority/permission-prompter";
+import {
+  composeServingAnnouncers,
+  getServingSessionRegistry,
+} from "#src/authority/serving-registry";
+import { SubagentDetection } from "#src/authority/subagent-detection";
+import { subscribeSubagentLifecycle } from "#src/authority/subagent-lifecycle-events";
+import { getSubagentSessionRegistry } from "#src/authority/subagent-registry";
+import { registerPermissionSystemCommand } from "#src/config/config-modal";
+import { getGlobalConfigPath } from "#src/config/config-paths";
+import { ConfigStore } from "#src/config/config-store";
+import { isYoloModeEnabled } from "#src/config/extension-config";
+import { computeExtensionPaths } from "#src/config/extension-paths";
+import { GateRunner } from "#src/handlers/gates/runner";
+import { SkillInputGatePipeline } from "#src/handlers/gates/skill-input-gate-pipeline";
+import { ToolCallGatePipeline } from "#src/handlers/gates/tool-call-gate-pipeline";
+import { createFailClosedToolCall } from "#src/handlers/tool-call-boundary";
+import { DecisionAudit } from "#src/logging/decision-audit";
+import { GateDecisionReporter } from "#src/logging/decision-reporter";
+import { PermissionSessionLogger } from "#src/logging/session-logger";
+import { pathFlavorForPlatform } from "#src/path/path-flavor";
+import { PermissionManager } from "#src/policy/permission-manager";
+import { PermissionResolver } from "#src/policy/permission-resolver";
+import { resolveRenderBudget } from "#src/presentation/dialog-renderer";
+import { LocalPermissionsService } from "#src/service/permissions-service";
+import { PermissionServiceLifecycle } from "#src/service/service-lifecycle";
+import { PermissionSession } from "#src/session/permission-session";
+import { SessionRules } from "#src/session/session-rules";
+// Fork: persists "allow forever" grants to the user's config store.
+import { ConfigForeverApprovalRecorder } from "#src/forever-approval-recorder";
+import { registerBuiltinToolInputFormatters } from "#src/tool-input/builtin-tool-input-formatters";
+import { ToolAccessExtractorRegistry } from "#src/tool-input/tool-access-extractor-registry";
+import { ToolInputFormatterRegistry } from "#src/tool-input/tool-input-formatter-registry";
 import {
   AgentPrepHandler,
   PermissionGateHandler,
   SessionLifecycleHandler,
+  SessionTurnPrep,
 } from "./handlers";
-import { GateRunner } from "./handlers/gates/runner";
-import { SkillInputGatePipeline } from "./handlers/gates/skill-input-gate-pipeline";
-import { ToolCallGatePipeline } from "./handlers/gates/tool-call-gate-pipeline";
-import { createFailClosedToolCall } from "./handlers/tool-call-boundary";
-import { pathFlavorForPlatform } from "./path/path-flavor";
-import { PermissionManager } from "./permission-manager";
-import { PermissionResolver } from "./permission-resolver";
-import { PermissionSession } from "./permission-session";
-import { LocalPermissionsService } from "./permissions-service";
-import { resolveRenderBudget } from "./presentation/dialog-renderer";
-import { PermissionServiceLifecycle } from "./service-lifecycle";
-import { PermissionSessionLogger } from "./session-logger";
-import { SessionRules } from "./session-rules";
-import { ToolAccessExtractorRegistry } from "./tool-access-extractor-registry";
-import { ToolInputFormatterRegistry } from "./tool-input-formatter-registry";
+import { getPermissionsService, type PermissionsService } from "./service";
 
 export default function piPermissionSystemExtension(pi: ExtensionAPI): void {
   const agentDir = getAgentDir();
@@ -112,6 +131,20 @@ export default function piPermissionSystemExtension(pi: ExtensionAPI): void {
 
   const prompter = new PermissionPrompter({ logger });
 
+  // The filesystem half of the serving announcement. `servingRegistry` reaches
+  // an in-process child through `globalThis`; a child in its own process shares
+  // nothing but this directory, so the served session publishes a heartbeat
+  // there too (#721).
+  const servingHeartbeats = new ServingHeartbeatStore({
+    forwardingDir: paths.forwardingDir,
+    logger,
+  });
+  // The read side of both channels, routed by how the target was resolved.
+  const servingLiveness = new ForwardingLivenessJudge({
+    registry: servingRegistry,
+    heartbeats: servingHeartbeats,
+  });
+
   const authorizerSelection = new AuthorizerSelection({
     detection: subagentDetection,
     events: pi.events,
@@ -122,7 +155,7 @@ export default function piPermissionSystemExtension(pi: ExtensionAPI): void {
     requestPermissionDecision,
     forwardingDir: paths.forwardingDir,
     registry: subagentRegistry,
-    servingRegistry,
+    serving: servingLiveness,
     getForwardingTimeoutMs: () =>
       configStore.current().forwardingTimeoutMs ??
       PERMISSION_FORWARDING_TIMEOUT_MS,
@@ -161,11 +194,19 @@ export default function piPermissionSystemExtension(pi: ExtensionAPI): void {
       ),
   };
 
+  // Constructed here rather than beside the gate runner below: the serving
+  // side broadcasts its own decisions, so both readers share one reporter over
+  // this session's event bus.
+  const reporter = new GateDecisionReporter(logger, pi.events);
+
   const requestServer = new ForwardedRequestServer({
     forwardingDir: paths.forwardingDir,
     logger,
     policy: servingPolicy,
     escalator: authorizerSelection,
+    // The forwarded ask's own gate lives in the requesting session, so the
+    // serving side announces the terminal decision on this session's bus.
+    broadcaster: reporter,
     // Records a whole-session grant into the same SessionRules the resolver and
     // gate runner read, so a serving-scope grant governs the parent and future
     // forwarded resolutions.
@@ -176,9 +217,8 @@ export default function piPermissionSystemExtension(pi: ExtensionAPI): void {
   session = new PermissionSession(
     paths,
     new ForwardingManager({
-      detection: subagentDetection,
       forwarder: requestServer,
-      serving: servingRegistry,
+      serving: composeServingAnnouncers(servingRegistry, servingHeartbeats),
       logger,
     }),
     permissionManager,
@@ -205,29 +245,50 @@ export default function piPermissionSystemExtension(pi: ExtensionAPI): void {
       ),
   });
 
-  const permissionsService = new LocalPermissionsService(
+  // Explicitly annotated to break a type-inference cycle: the selection's
+  // `getPermissionQuery` thunk closes over this service, and the service's
+  // registrar closes back over the selection. Both are resolved at call time
+  // at runtime; `tsc` needs one of the two typed by hand to unwind them.
+  const permissionsService: PermissionsService = new LocalPermissionsService(
     resolver,
     session,
     formatterRegistry,
     accessExtractorRegistry,
-    authorizerRegistry,
+    // Sibling extensions register through the observing decorator, so a link
+    // offered to a node whose chain never runs is accepted and recorded rather
+    // than vanishing (ADR 0012 decision 4). Chain resolution keeps reading the
+    // undecorated registry above.
+    new ObservedAuthorizerRegistrar(
+      authorizerRegistry,
+      authorizerSelection,
+      logger,
+    ),
   );
 
   // Subscribe to @gotgenes/pi-subagents' child lifecycle events so child
-  // sessions register/unregister without the core calling us (ADR 0002).
+  // sessions register/unregister without the core calling us (ADR 0002), and
+  // so a child that bound its extensions without loading one of ours is
+  // reported rather than silently ungated (#792). The lookup is a thunk over
+  // the locator, never a cached reference, per the guidance in service.ts.
+  const childNodeAudit = new ChildNodeAudit(
+    (sessionId) => getPermissionsService(sessionId) !== undefined,
+    logger,
+  );
   const unsubSubagentLifecycle = subscribeSubagentLifecycle(
     pi.events,
     subagentRegistry,
+    childNodeAudit,
   );
 
   // PermissionServiceLifecycle owns the process-global service publication:
-  // activate() publishes (skipped for registered subagent children — see #302)
-  // and emits ready; teardown() unsubscribes all session listeners and
-  // unpublishes. Deferred to session_start because identifying a child
-  // requires the session id from ctx, unavailable at factory-init time.
+  // activate() publishes this node's service under its own session id, then
+  // announces the node's session id and chain role on the ready channel;
+  // teardown() unsubscribes all session listeners and unpublishes.
+  // Deferred to session_start because both facts come from ctx, unavailable at
+  // factory-init time.
   const serviceLifecycle = new PermissionServiceLifecycle(
     permissionsService,
-    subagentDetection,
+    authorizerSelection,
     pi.events,
     [unsubSubagentLifecycle],
   );
@@ -246,16 +307,22 @@ export default function piPermissionSystemExtension(pi: ExtensionAPI): void {
     logger,
     audit,
   );
-  const agentPrep = new AgentPrepHandler(
+  const turnPrep = new SessionTurnPrep(
     session,
-    resolver,
-    toolRegistry,
     () => {
       void warmBashParser();
     },
+    serviceLifecycle,
+  );
+  const agentPrep = new AgentPrepHandler(
+    turnPrep,
+    session,
+    resolver,
+    toolRegistry,
+    logger,
   );
 
-  const reporter = new GateDecisionReporter(logger, pi.events);
+  // Fork: persist "allow forever" grants to the config store (reporter is created upstream above).
   const foreverRecorder = new ConfigForeverApprovalRecorder(agentDir);
   const gateRunner = new GateRunner(
     resolver,
@@ -265,11 +332,25 @@ export default function piPermissionSystemExtension(pi: ExtensionAPI): void {
     reporter,
     isYoloEnabled,
   );
+  // This node's ancestors in the current process. The gates read their
+  // fact-shaping registrations through the inheriting lookups below, so a
+  // child whose own registry is missing an extractor still sees the path its
+  // tool touches (ADR 0012 decision 1, the fact-shaping clause; #793).
+  // Registration itself is untouched: the service's registrars still write to
+  // the undecorated registries, so an entry lands in this node alone.
+  const ancestorNodes = new AncestorNodes(
+    serviceLifecycle,
+    subagentRegistry,
+    getPermissionsService,
+  );
   const toolCallGatePipeline = new ToolCallGatePipeline(
     resolver,
     session,
-    formatterRegistry,
-    accessExtractorRegistry,
+    new InheritingToolInputFormatterLookup(formatterRegistry, ancestorNodes),
+    new InheritingToolAccessExtractorLookup(
+      accessExtractorRegistry,
+      ancestorNodes,
+    ),
   );
   const skillInputGatePipeline = new SkillInputGatePipeline(resolver);
   const gates = new PermissionGateHandler(

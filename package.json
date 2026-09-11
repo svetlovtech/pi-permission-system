@@ -1,6 +1,6 @@
 {
   "name": "@gotgenes/pi-permission-system",
-  "version": "25.4.0",
+  "version": "32.0.1",
   "description": "Permission enforcement extension for the Pi coding agent.",
   "type": "module",
   "exports": {
@@ -26,6 +26,23 @@
     "CHANGELOG.md",
     "LICENSE"
   ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "build:types": "rollup -c rollup.dts.config.mjs",
+    "prepack": "pnpm run build:types",
+    "gen:schema": "node --experimental-strip-types scripts/generate-permissions-schema.ts && biome format --write schemas/permissions.schema.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:public-types": "bash scripts/verify-public-types.sh",
+    "measure:core-coverage": "node scripts/measure-core-coverage.mjs",
+    "measure:path-false-positives": "node scripts/measure-path-false-positives.mjs",
+    "measure:statement-descent": "node scripts/measure-statement-descent.mjs",
+    "measure:statement-operands": "node scripts/measure-statement-operands.mjs",
+    "measure:unresolved-redirects": "node scripts/measure-unresolved-redirects.mjs",
+    "measure:wrapper-transparency": "node scripts/measure-wrapper-transparency.mjs",
+    "lint:md": "rumdl check *.md docs/**/*.md",
+    "lint": "biome check . && eslint . && pnpm run lint:md"
+  },
   "keywords": [
     "pi-package",
     "pi",
@@ -67,29 +84,19 @@
     "@earendil-works/pi-tui": ">=0.79.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.16",
+    "@biomejs/biome": "catalog:",
     "@earendil-works/pi-coding-agent": "0.79.1",
     "@earendil-works/pi-tui": "0.79.1",
-    "@types/node": "^22.15.3",
-    "rollup": "^4.62.2",
-    "rollup-plugin-dts": "^6.4.1",
-    "rumdl": "^0.2.10",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.8"
+    "@types/node": "catalog:",
+    "rollup": "catalog:",
+    "rollup-plugin-dts": "catalog:",
+    "rumdl": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   },
   "dependencies": {
     "tree-sitter-bash": "^0.25.1",
     "web-tree-sitter": "^0.26.9",
     "zod": "^4.4.3"
-  },
-  "scripts": {
-    "check": "tsc --noEmit",
-    "build:types": "rollup -c rollup.dts.config.mjs",
-    "gen:schema": "node --experimental-strip-types scripts/generate-permissions-schema.ts && biome format --write schemas/permissions.schema.json",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "verify:public-types": "bash scripts/verify-public-types.sh",
-    "lint:md": "rumdl check *.md docs/**/*.md",
-    "lint": "biome check . && eslint . && pnpm run lint:md"
   }
 }

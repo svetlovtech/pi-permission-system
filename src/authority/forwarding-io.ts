@@ -8,8 +8,19 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-
-import { isPermissionDecisionState } from "#src/authority/permission-dialog";
+import {
+  OWNER_ONLY_DIRECTORY_MODE,
+  OWNER_ONLY_FILE_MODE,
+} from "#src/logging/log-file-permissions";
+import type { DebugReviewLogger } from "#src/logging/session-logger";
+import { asPromptPayload } from "#src/presentation/prompt-payload";
+import type { PermissionUiPromptSource } from "#src/service/permission-events";
+import {
+  type ApprovalGrant,
+  isSessionGrantWidth,
+} from "#src/session/approval-grant";
+import { asDecisionSource } from "./decision-source";
+import { isPermissionDecisionState } from "./permission-dialog";
 import {
   createPermissionForwardingLocation,
   type ForwardedAccessIntent,
@@ -17,13 +28,7 @@ import {
   type ForwardedPermissionResponse,
   type ForwardedSessionApproval,
   type PermissionForwardingLocation,
-} from "#src/authority/permission-forwarding";
-import {
-  OWNER_ONLY_DIRECTORY_MODE,
-  OWNER_ONLY_FILE_MODE,
-} from "#src/log-file-permissions";
-import type { PermissionUiPromptSource } from "#src/permission-events";
-import type { DebugReviewLogger } from "#src/session-logger";
+} from "./permission-forwarding";
 
 /** Valid `permissions:ui_prompt` source values, for tolerant request reads. */
 const UI_PROMPT_SOURCES = [
@@ -47,12 +52,34 @@ function asNullableDisplayString(value: unknown): string | null | undefined {
   return undefined;
 }
 
+/** Narrow an unknown value to an `ApprovalGrant`, or `undefined`. */
+function asApprovalGrant(value: unknown): ApprovalGrant | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const candidate = value as Partial<ApprovalGrant>;
+  if (
+    typeof candidate.surface !== "string" ||
+    candidate.surface.length === 0 ||
+    typeof candidate.pattern !== "string"
+  ) {
+    return undefined;
+  }
+  return { surface: candidate.surface, pattern: candidate.pattern };
+}
+
 /**
  * Narrow an unknown value to a `ForwardedSessionApproval`, or `undefined`.
  *
  * Tolerant read: the child's session-approval suggestion is optional (absent
- * on an older child) and only accepted when well-formed — a non-empty surface
- * and an all-string patterns array.
+ * on an older child) and only accepted when well-formed — a non-empty `grants`
+ * array whose every entry names a non-empty surface and a pattern. The
+ * pre-#810 shape (`surface` plus `patterns`) is rejected rather than
+ * normalized, so a version-skewed request drops the suggestion and the serving
+ * dialog offers no whole-session scope.
+ *
+ * An empty `grants` array is rejected too: it would record nothing while still
+ * writing a `forwarded_permission.session_recorded` entry claiming it had.
  */
 function asForwardedSessionApproval(
   value: unknown,
@@ -61,15 +88,16 @@ function asForwardedSessionApproval(
     return undefined;
   }
   const candidate = value as Partial<ForwardedSessionApproval>;
-  if (
-    typeof candidate.surface !== "string" ||
-    candidate.surface.length === 0 ||
-    !Array.isArray(candidate.patterns) ||
-    !candidate.patterns.every((pattern) => typeof pattern === "string")
-  ) {
+  if (!Array.isArray(candidate.grants) || candidate.grants.length === 0) {
     return undefined;
   }
-  return { surface: candidate.surface, patterns: [...candidate.patterns] };
+  const grants: ApprovalGrant[] = [];
+  for (const entry of candidate.grants) {
+    const grant = asApprovalGrant(entry);
+    if (!grant) return undefined;
+    grants.push(grant);
+  }
+  return { grants };
 }
 
 /**
@@ -396,8 +424,7 @@ export function readForwardedPermissionRequest(
       typeof parsed.createdAt !== "number" ||
       typeof parsed.requesterSessionId !== "string" ||
       typeof parsed.targetSessionId !== "string" ||
-      typeof parsed.requesterAgentName !== "string" ||
-      typeof parsed.message !== "string"
+      typeof parsed.requesterAgentName !== "string"
     ) {
       logPermissionForwardingWarning(
         logger,
@@ -412,9 +439,11 @@ export function readForwardedPermissionRequest(
       requesterSessionId: parsed.requesterSessionId,
       targetSessionId: parsed.targetSessionId,
       requesterAgentName: parsed.requesterAgentName,
-      message: parsed.message,
-      // Tolerant read: display fields are optional and may be absent (older
-      // child) or malformed; reconstruct only the well-formed ones.
+      // Tolerant read: the payload and display fields are optional and may be
+      // absent (older child) or malformed; reconstruct only the well-formed
+      // ones. An older child's `message` is deliberately not salvaged — a
+      // skewed ask renders from the fields it does carry (ADR 0011 §9).
+      payload: asPromptPayload(parsed.payload),
       source: asUiPromptSource(parsed.source),
       surface: asNullableDisplayString(parsed.surface),
       value: asNullableDisplayString(parsed.value),
@@ -464,6 +493,15 @@ export function readForwardedPermissionResponse(
         typeof parsed.respondedAt === "number"
           ? parsed.respondedAt
           : Date.now(),
+      // Tolerant like the request's `accessIntent`: an unusable provenance
+      // record is dropped, but the decision itself still has to reach the
+      // requester, so it never rejects the response.
+      decidedBy: asDecisionSource(parsed.decidedBy),
+      // Tolerant for the same reason, and least-privilege when it fires: a
+      // dropped width records the grant on the surface the gate proved.
+      sessionGrantWidth: isSessionGrantWidth(parsed.sessionGrantWidth)
+        ? parsed.sessionGrantWidth
+        : undefined,
     };
   } catch (error) {
     logPermissionForwardingWarning(

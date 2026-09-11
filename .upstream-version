@@ -2,6 +2,6 @@
   "package": "@gotgenes/pi-permission-system",
   "upstreamRepo": "https://github.com/gotgenes/pi-packages",
   "upstreamPath": "packages/pi-permission-system",
-  "baselineVersion": "25.4.0",
-  "baselineCommit": "c464d68"
+  "baselineVersion": "32.0.1",
+  "baselineCommit": "a867122d8e38655f0e4a02b30a71c08d5a38f0a3"
 }

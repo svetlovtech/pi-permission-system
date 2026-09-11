@@ -7,9 +7,9 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
-import { getGlobalConfigPath } from "./config-paths";
-import { loadUnifiedConfig } from "./config-loader";
-import type { SessionApproval } from "./session-approval";
+import { getGlobalConfigPath } from "#src/config/config-paths";
+import { loadUnifiedConfig } from "#src/config/config-loader";
+import type { SessionApproval } from "#src/session/session-approval";
 
 /**
  * Persists an "allow forever" gate decision into the global config.json as a
@@ -35,8 +35,8 @@ export class ConfigForeverApprovalRecorder implements ForeverApprovalRecorder {
    * several rules (mirroring `SessionRules.recordSessionApproval`).
    */
   recordForeverApproval(approval: SessionApproval): void {
-    for (const pattern of approval.patterns) {
-      this.persistRule(approval.surface, pattern);
+    for (const grant of approval.grants) {
+      this.persistRule(grant.surface, grant.pattern);
     }
   }
 

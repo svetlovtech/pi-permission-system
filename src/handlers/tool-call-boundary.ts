@@ -1,9 +1,9 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { DecisionRecorder } from "#src/decision-audit";
-import type { DecisionReporter } from "#src/decision-reporter";
+import type { GateOutcome } from "#src/handlers/gates/types";
+import type { DecisionRecorder } from "#src/logging/decision-audit";
+import type { DecisionReporter } from "#src/logging/decision-reporter";
 import { createPermissionRequestId } from "#src/permission-request-id";
 import { toRecord } from "#src/value-guards";
-import type { GateOutcome } from "./gates/types";
 
 /** The SDK-facing result shape for a `tool_call` handler. */
 type ToolCallResult = { block?: true; reason?: string };
@@ -66,7 +66,12 @@ export function createFailClosedToolCall(
  * The block below this must be reached: the SDK does not catch a throwing
  * handler, so an exception escaping the recording work would leave the command
  * ungated. The request id is minted here rather than borrowed — the throw may
- * have come from anywhere in the pipeline, so no gate's id is available.
+ * have come from anywhere in the pipeline, so no gate's id is available — and
+ * shared by both records, so the terminal broadcast joins the review entry.
+ *
+ * The broadcast carries what the raw event yields and nothing inferred: no
+ * rule won, and the boundary holds no session, so `origin`, `matchedPattern`,
+ * and `agentName` are `null` (#753).
  */
 function recordGateError(
   reporter: DecisionReporter,
@@ -76,12 +81,28 @@ function recordGateError(
 ): void {
   try {
     audit.recordError();
+    const reason = errorMessage(error);
+    const requestId = createPermissionRequestId();
+    const toolName = bestEffortToolName(event);
+    const command = bestEffortCommand(event);
     reporter.writeReviewLog("permission_request.blocked", {
-      requestId: createPermissionRequestId(),
-      toolName: bestEffortToolName(event),
-      command: bestEffortCommand(event),
+      requestId,
+      toolName,
+      command,
       resolution: "gate_error",
-      error: errorMessage(error),
+      error: reason,
+      // The boundary decided, by failing closed -- no rule and no human did.
+      decidedBy: { kind: "gate_error", reason },
+    });
+    reporter.emitDecision({
+      requestId,
+      surface: toolName,
+      value: command ?? toolName,
+      result: "deny",
+      resolution: "gate_error",
+      origin: null,
+      agentName: null,
+      matchedPattern: null,
     });
   } catch {
     // The block is the guarantee; its bookkeeping is not.

@@ -6,7 +6,7 @@ Permission enforcement extension for the Pi coding agent.
 
 - npm package: `@gotgenes/pi-permission-system`
 - repo: https://github.com/gotgenes/pi-packages (monorepo, this package lives in `packages/pi-permission-system`)
-- Pi loads THIS fork (not the npm package): `~/.pi/agent/settings.json` → `/home/dev/pi-forks/pi-permission-system`
+- Pi loads THIS fork (not the npm package): `~/.pi/agent/extensions/svetlovtech-pi-permission-system`
 - GitHub mirror (origin): https://github.com/svetlovtech/pi-permission-system (private, standalone repo). Push: `git push origin main`.
 
 > Note: the old standalone repo https://github.com/gotgenes/pi-permission-system is
@@ -15,43 +15,50 @@ Permission enforcement extension for the Pi coding agent.
 
 ## Baseline
 
-- Fork is based on `@gotgenes/pi-permission-system@25.4.0` (npm copy snapshot).
-- Baseline commit: `c464d68` ("baseline: @gotgenes/pi-permission-system v25.4.0 (npm copy)").
+- Fork is based on `@gotgenes/pi-permission-system@32.0.1` (pi-packages `packages/pi-permission-system` tree).
+- Baseline commit: `a867122d`.
 - See `.upstream-version` for machine-readable metadata.
+
+> 32.0.1 restructured the tree: flat modules moved into `config/`, `logging/`,
+> `policy/`, `presentation/`, `session/`, `tool-input/`. Local changes below
+> already live at the new paths.
 
 ## Local changes (ours, on top of baseline)
 
 | Area | Files | Why |
 |---|---|---|
-| Telegram bridge resolve hook | `authority/permission-dialog.ts`, `authority/local-user-authorizer.ts`, `authority/permission-prompter.ts`, `authority/permission-prompt-component.ts` | `pi-telegram-bridge` extension can resolve a permission ask from Telegram: `externalResolve` option + `pi-telegram-bridge:resolve-permission` event subscription. |
-| "Allow forever" option | `authority/permission-prompt-decision.ts`, `authority/permission-prompt-component.ts`, `pattern-suggest.ts`, `permission-gate.ts`, `handlers/gates/runner.ts`, `handlers/gates/descriptor.ts`, `handlers/gates/tool.ts`, `index.ts`, `forever-approval-recorder.ts` (new) | Adds the `(f)` hotkey + `approved_forever` resolution and persists forever grants to config. |
-| MCP input preview | `builtin-tool-input-formatters.ts`, `tool-input-preview.ts` | Built-in `mcp` formatter showing tool args (`with name: ..., command: [...]`); preview length defaults raised to `Infinity` so the renderer (not the formatter) decides elision. |
-| Full-request pager | `authority/permission-prompt-component.ts` | `ctrl+o` opens a pager bounded to terminal height: `↑/↓`, `j/k`, `PageUp/PageDown`, `Home/End`, `Enter` scroll inside the dialog; `esc` returns to compact view; letters `y/s/f/n/r` decide directly. |
+| Telegram bridge resolve hook | `src/authority/permission-dialog.ts`, `src/authority/local-user-authorizer.ts`, `src/authority/permission-prompter.ts`, `src/authority/permission-prompt-component.ts` | `pi-telegram-bridge` can resolve a permission ask from Telegram: `externalResolve` option + `pi-telegram-bridge:resolve-permission` event subscription. `buildRequestOptions` keeps its `events` param (upstream removed it). |
+| "Allow forever" option | `src/authority/permission-prompt-decision.ts`, `src/authority/permission-prompt-component.ts`, `src/presentation/pattern-suggest.ts`, `src/policy/permission-gate.ts`, `src/handlers/gates/runner.ts`, `src/handlers/gates/descriptor.ts`, `src/index.ts`, `src/forever-approval-recorder.ts` (local-only) | `(f)` hotkey + `approved_forever` resolution, persisted to config via `ConfigForeverApprovalRecorder`. Gate carries `foreverApproval` as `{ grants }` (via `toForwardedData()`). `SessionApprovalSuggestion.foreverLabel` is optional (fork). |
+| Full-request pager | `src/authority/permission-prompt-component.ts` | `ctrl+o` pager bounded to terminal height (`getTerminalRows` ctor param — upstream dropped it); `↑/↓`, `j/k`, PgUp/PgDn, Home/End, Enter scroll; letters decide directly. |
+| MCP input preview | `src/tool-input/builtin-tool-input-formatters.ts`, `src/tool-input/tool-input-preview.ts` | Built-in `mcp` formatter; `TOOL_INPUT_PREVIEW_MAX_LENGTH = Infinity` (renderer decides elision), log preview capped at 1000. |
 
 ## Syncing upstream updates
 
-Run from the repo root:
-
 ```bash
-../sync-upstream.sh          # compares .upstream-version vs npm latest, applies non-conflicting updates
-git status                   # review: "CONFLICT" files need manual merge
+git remote add upstream https://github.com/gotgenes/pi-packages 2>/dev/null
+git fetch upstream
+# upstream delta vs current baseline:
+git diff $(python3 -c "import json;print(json.load(open('.upstream-version'))['baselineCommit'])") upstream/main -- packages/pi-permission-system
 ```
 
-Manual (reference):
+The 32.0.1 sync procedure (repeat for future versions):
 
-```bash
-git fetch upstream https://github.com/gotgenes/pi-packages 2>/dev/null || git remote add upstream https://github.com/gotgenes/pi-packages
-git log upstream/main --oneline -- packages/pi-permission-system   # what changed upstream
-git diff c464d68 upstream/main -- packages/pi-permission-system    # upstream delta vs our baseline
-```
+1. Extract the new tree: `git archive <commit> packages/pi-permission-system | tar -x --strip-components=2 -C /tmp/ps-upstream`.
+2. Clear tracked files (keep `.gitignore`, `.upstream-version`, `AGENTS.md`, `src/forever-approval-recorder.ts`), copy theirs in (skip monorepo plumbing: `scripts/`, `rollup.dts.config.mjs`, their `AGENTS.md`).
+3. Re-apply local changes (table above) — ours-modified files need a `git merge-file` 3-way vs the npm-snapshot base of the previous baseline.
+4. Type check: deps are `catalog:` in upstream — `sed 's/"catalog:"/"latest"/g' package.json && npm install --no-save && git checkout -- package.json`, then `npx tsc --noEmit` with a local config stubbing `tsconfig.base.json` (lib es2023, moduleResolution bundler, types node).
+5. `bun build src/index.ts --target=bun --external "@earendil-works/*" --outdir=/tmp/builddrop`.
+6. Update `baselineVersion`/`baselineCommit` in `.upstream-version`, commit, push.
 
 Rules:
-- Files NOT locally modified can be auto-updated (the sync script does this).
+- Files NOT locally modified can be taken from upstream wholesale.
 - Files in the table above are locally modified — upstream changes there need a MANUAL merge.
-- Never revert `forever-approval-recorder.ts` (local-only file, absent upstream).
-- After syncing, update `baselineVersion`/`baselineCommit` in `.upstream-version` and commit.
+- Never revert `src/forever-approval-recorder.ts` (local-only file, absent upstream).
+- `node_modules/` is gitignored; the old tracked symlink to `/home/dev/...` is gone.
 
 ## Build / check
 
-- `bun build src/index.ts --target=bun --external "@earendil-works/*" --outdir=/tmp/builddrop` (the package uses `#src/*` import map; plain `bun build` from src/ may fail on `#src` — the sync script / previous sessions copy src to /tmp and rewrite imports, or run from the package root where `imports` resolves).
+- Deps for type check: `sed 's/"catalog:"/"latest"/g' package.json && npm install --no-save && git checkout -- package.json` (upstream pins devDeps via pnpm catalogs npm cannot read).
+- `bun build src/index.ts --target=bun --external "@earendil-works/*" --outdir=/tmp/builddrop` — syntax/import gate.
+- `npx tsc --noEmit` with a config stubbing the monorepo `tsconfig.base.json` (lib es2023, moduleResolution bundler, types node) — full type gate.
 - No tests are run in this fork's working copy (vitest deps are in the upstream package, not vendored).
