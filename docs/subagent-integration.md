@@ -141,7 +141,7 @@ What the announcement enables:
    When the parent approves "for this session," it chooses a scope: **this subagent only** (the least-privilege default) records the grant on the requesting child, while **the whole session** records it on the serving parent so the parent and all its subagents resolve it without re-prompting.
 
 No configuration is required - the integration is automatic when both extensions are installed.
-When `@gotgenes/pi-permission-system` is not installed, an implementation emits its lifecycle events with no subscriber - a harmless no-op.
+When `@svetlovtech/pi-permission-system` is not installed, an implementation emits its lifecycle events with no subscriber - a harmless no-op.
 
 ## Permission Forwarding
 

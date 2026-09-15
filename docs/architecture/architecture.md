@@ -571,7 +571,7 @@ The locator's `sessionId` is required rather than optional, so a `PermissionsRea
 The `package.json` `exports` field's `default` condition points to `src/service.ts`, which contains the interface, the accessor functions, and the `Symbol.for()` key - no extension machinery.
 The `types` condition instead resolves to a bundled `dist/public.d.ts` (built by `rollup-plugin-dts` from `rollup.dts.config.mjs`, published via `prepack`) so a downstream consumer's `tsc` never follows the raw `#src/*` module graph - only the `default` condition (the jiti runtime) reads `src/` directly (#592).
 
-Both accessors come from `import("@gotgenes/pi-permission-system")`.
+Both accessors come from `import("@svetlovtech/pi-permission-system")`.
 The `PermissionsService` interface exposes six methods:
 
 - `checkPermission(surface, value?, agentName?)` - full policy query.
@@ -1161,7 +1161,7 @@ Recompute commands (run from the repo root):
 - Policy-scope export: `grep -c 'getPolicyScope' packages/pi-permission-system/src/service.ts`
 - ADR 0007 amendments: `grep -c '#### Amendment' packages/pi-permission-system/docs/decisions/0007-model-judge-authorizer-chain-adr.md` (Step 7 records its answer as an amendment whether accepted or rejected, so the row reads ≥ 1 either way)
 - Non-path tokens per month: `node packages/pi-permission-system/scripts/measure-path-false-positives.mjs` (read the latest month's `non-path` column; the log grows with use, so re-run rather than trusting the figure)
-- Health / clone groups / dead exports: `pnpm fallow health --score --hotspots --targets --workspace @gotgenes/pi-permission-system` / `pnpm fallow dupes --workspace @gotgenes/pi-permission-system` (count the groups whose paths are under `src/`) / `pnpm fallow dead-code --workspace @gotgenes/pi-permission-system`
+- Health / clone groups / dead exports: `pnpm fallow health --score --hotspots --targets --workspace @svetlovtech/pi-permission-system` / `pnpm fallow dupes --workspace @svetlovtech/pi-permission-system` (count the groups whose paths are under `src/`) / `pnpm fallow dead-code --workspace @svetlovtech/pi-permission-system`
 
 The prefix re-spelling count needs a pipeline, so it lives here rather than in the table:
 

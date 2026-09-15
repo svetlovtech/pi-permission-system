@@ -21,7 +21,7 @@ pi.events.on("permissions:ready", (data) => {
   void (async () => {
     try {
       const { getPermissionsService } =
-        await import("@gotgenes/pi-permission-system");
+        await import("@svetlovtech/pi-permission-system");
       const permissions = getPermissionsService(sessionId);
       if (permissions) {
         const result = permissions.checkPermission("bash", "git push");
@@ -45,7 +45,7 @@ One process can host several **nodes** — one Pi session runtime each, with its
 A root session and each of its in-process subagent children are separate nodes, and each loads its own instance of this extension.
 Registrations never cross a node boundary: a formatter, an access extractor, or an authorizer link is read by the node it was registered in.
 
-Each node therefore publishes its own service at `session_start`, into a `globalThis` map keyed by that node's session id (`Symbol.for("@gotgenes/pi-permission-system:session-services")`).
+Each node therefore publishes its own service at `session_start`, into a `globalThis` map keyed by that node's session id (`Symbol.for("@svetlovtech/pi-permission-system:session-services")`).
 Consumers call `getPermissionsService(sessionId)` to retrieve it — even though their `import()` loads a fresh module copy, the accessor reads from the shared `globalThis` slot.
 The session id arrives as a field on the `permissions:ready` broadcast, which each node emits at its own `session_start`, right after publishing — and again at that node's first `before_agent_start`, so a consumer whose own `session_start` ran later still hears it.
 
@@ -54,7 +54,7 @@ A separate legacy slot once held the process root's service, read by a deprecate
 If you are upgrading from a release that had it, see [migration/0796-remove-process-root-slot.md](migration/0796-remove-process-root-slot.md); if you are upgrading from one whose `getPermissionsService()` took no argument, start with [migration/0794-keyed-service-locator.md](migration/0794-keyed-service-locator.md).
 
 All types below are directly importable and type-check with `tsc` out of the box.
-`@gotgenes/pi-permission-system`'s published `exports` resolve `import type { … }` to a self-contained, bundled declaration file with no internal module references, so a downstream `tsconfig.json` needs no special path configuration.
+`@svetlovtech/pi-permission-system`'s published `exports` resolve `import type { … }` to a self-contained, bundled declaration file with no internal module references, so a downstream `tsconfig.json` needs no special path configuration.
 
 ### API
 
@@ -236,7 +236,7 @@ export default function myExtension(pi: ExtensionAPI): void {
     void (async () => {
       try {
         const { getPermissionsService } =
-          await import("@gotgenes/pi-permission-system");
+          await import("@svetlovtech/pi-permission-system");
         const permissions = getPermissionsService(sessionId);
         disposeFormatter = permissions?.registerToolInputFormatter(
           "deploy", // a tool THIS extension registers with Pi
@@ -394,7 +394,7 @@ It carries `request`, the permission ask's invariant core, verbatim from the pro
 The bus is the narrowest renderer: any loaded extension can observe it without the operator having named that extension, whereas every other route to an ask's evidence requires that consent (a registered tool-input formatter, or an `Authorizer` link the operator lists in `authorizerChain`).
 
 ```typescript
-import type { PermissionUiPromptEvent } from "@gotgenes/pi-permission-system";
+import type { PermissionUiPromptEvent } from "@svetlovtech/pi-permission-system";
 
 pi.events.on("permissions:ui_prompt", (raw) => {
   const event = raw as PermissionUiPromptEvent;
@@ -477,7 +477,7 @@ Use the review log's `toolCallId` to join back to the Pi transcript.
 ```typescript
 pi.events.on("permissions:decision", (raw) => {
   const event =
-    raw as import("@gotgenes/pi-permission-system").PermissionDecisionEvent;
+    raw as import("@svetlovtech/pi-permission-system").PermissionDecisionEvent;
   console.log(event.surface, event.result, event.resolution);
   // e.g. "bash" "allow" "user_approved_for_session"
 });
@@ -547,7 +547,7 @@ pi.events.on("permissions:ready", (data) => {
   if (dispose || !sessionId) return;
   void (async () => {
     const { getPermissionsService } =
-      await import("@gotgenes/pi-permission-system");
+      await import("@svetlovtech/pi-permission-system");
     const permissions = getPermissionsService(sessionId);
     // This node published before the event fired — resolve and register now.
     dispose = permissions?.registerAuthorizer("my-link", authorize);

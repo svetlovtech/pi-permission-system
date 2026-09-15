@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Fork release (2026-09-15) — @svetlovtech/pi-permission-system
+
+Public fork of `@gotgenes/pi-permission-system` (upstream: [gotgenes/pi-packages](https://github.com/gotgenes/pi-packages), baseline `32.0.1` = commit `a867122d`). Fork features on top of the upstream baseline:
+
+### Added
+
+- External resolve hook: an external extension can answer the permission dialog via the `pi-telegram-bridge:resolve-permission` event and the `externalResolve` option (e.g. approve from Telegram via `pi-telegram-bridge`).
+- "Allow forever" hotkey `f` in the permission dialog: resolves as `approved_forever` and persists the approval across sessions via `src/forever-approval-recorder.ts`.
+- Full-request pager on `ctrl+o`, bounded to the terminal height (`getTerminalRows`) with scrolling (`↑/↓`, `j/k`, PgUp/PgDn, Home/End, Enter).
+- Built-in MCP tool-input preview formatter, with unbounded preview length (`TOOL_INPUT_PREVIEW_MAX_LENGTH = Infinity`).
+
 ## [32.0.1](https://github.com/gotgenes/pi-packages/compare/pi-permission-system-v32.0.0...pi-permission-system-v32.0.1) (2026-09-11)
 
 

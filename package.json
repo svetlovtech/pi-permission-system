@@ -1,7 +1,7 @@
 {
-  "name": "@gotgenes/pi-permission-system",
+  "name": "@svetlovtech/pi-permission-system",
   "version": "32.0.1",
-  "description": "Permission enforcement extension for the Pi coding agent.",
+  "description": "Permission enforcement extension for the Pi coding agent. Fork of @gotgenes/pi-permission-system (gotgenes/pi-packages, baseline 32.0.1) adding an external resolve hook, an 'allow forever' approval, a full-request pager, and an MCP tool-input preview formatter.",
   "type": "module",
   "exports": {
     ".": {
@@ -61,12 +61,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gotgenes/pi-packages.git",
-    "directory": "packages/pi-permission-system"
+    "url": "git+https://github.com/svetlovtech/pi-permission-system.git"
   },
-  "homepage": "https://github.com/gotgenes/pi-packages/tree/main/packages/pi-permission-system#readme",
+  "homepage": "https://github.com/svetlovtech/pi-permission-system#readme",
   "bugs": {
-    "url": "https://github.com/gotgenes/pi-packages/issues"
+    "url": "https://github.com/svetlovtech/pi-permission-system/issues"
   },
   "engines": {
     "node": ">=22"

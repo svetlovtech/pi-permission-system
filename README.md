@@ -1,3 +1,14 @@
+# @svetlovtech/pi-permission-system
+
+> ⚠️ **Fork notice** — this is a fork of [`@gotgenes/pi-permission-system`](https://www.npmjs.com/package/@gotgenes/pi-permission-system) (upstream repo: [gotgenes/pi-packages](https://github.com/gotgenes/pi-packages), baseline `32.0.1` = commit `a867122d`). It is *not* the upstream package.
+>
+> This fork adds the following features on top of the upstream baseline:
+>
+> 1. **External resolve hook** — an external extension can answer the permission dialog via the `pi-telegram-bridge:resolve-permission` event and the `externalResolve` option (e.g. approve from Telegram via `pi-telegram-bridge`).
+> 2. **"Allow forever" hotkey (`f`)** — resolves the prompt as `approved_forever`, persisted across sessions via `src/forever-approval-recorder.ts`.
+> 3. **Full-request pager on `ctrl+o`** — the expanded request view is bounded to the terminal height (`getTerminalRows`) and scrolls.
+> 4. **MCP tool-input preview formatter** with unbounded preview length (`TOOL_INPUT_PREVIEW_MAX_LENGTH = Infinity`).
+
 <p align="center">
   <img src="docs/assets/logo.png" alt="pi-permission-system logo">
 </p>

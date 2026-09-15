@@ -27,7 +27,7 @@
 
 /** Process-global key for the shared registry slot. */
 const SUBAGENT_SESSION_REGISTRY_KEY = Symbol.for(
-  "@gotgenes/pi-permission-system:subagent-registry",
+  "@svetlovtech/pi-permission-system:subagent-registry",
 );
 
 /**

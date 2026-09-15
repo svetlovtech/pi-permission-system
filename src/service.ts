@@ -3,7 +3,7 @@
  *
  * `Symbol.for()` is process-global by spec, so it survives jiti's per-extension
  * module isolation (`moduleCache: false`). A consumer doing
- * `import("@gotgenes/pi-permission-system")` gets a fresh module copy, but the
+ * `import("@svetlovtech/pi-permission-system")` gets a fresh module copy, but the
  * accessors here read from the same `globalThis` slots the provider wrote to —
  * enabling direct, synchronous, type-safe function calls.
  *
@@ -71,7 +71,7 @@ export type { PermissionCheckResult, PermissionState, ToolInputFormatter };
 
 /** Process-global key for the session-keyed service map (ADR 0012 decision 2). */
 const SESSION_SERVICES_KEY = Symbol.for(
-  "@gotgenes/pi-permission-system:session-services",
+  "@svetlovtech/pi-permission-system:session-services",
 );
 
 /**

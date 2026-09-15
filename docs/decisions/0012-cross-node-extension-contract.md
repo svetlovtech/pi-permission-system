@@ -235,7 +235,7 @@ A future consumer should expect the same trade.
 
 #### Amendment (2026-08-30, [#796]): the process-root slot is removed
 
-The deferral's condition has been met, so the window closes and the whole mechanism goes — reader, both writers, the `Symbol.for("@gotgenes/pi-permission-system:service")` slot, and the `PI_PERMISSION_SYSTEM_DEP0001` warning with them.
+The deferral's condition has been met, so the window closes and the whole mechanism goes — reader, both writers, the `Symbol.for("@svetlovtech/pi-permission-system:service")` slot, and the `PI_PERMISSION_SYSTEM_DEP0001` warning with them.
 This supersedes the "major release now" alternative below, which rejected removal in the [#699] cut on the grounds that the window cost nothing.
 It cost nothing then and it buys nothing now.
 

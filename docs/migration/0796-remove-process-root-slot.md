@@ -3,7 +3,7 @@
 Starting with the release that closes #796, the deprecated process-root service accessor and the `globalThis` slot behind it no longer exist.
 
 This is a **breaking change**.
-If your extension does not import `getRootPermissionsService`, `publishRootPermissionsService`, or `unpublishRootPermissionsService` from `@gotgenes/pi-permission-system`, nothing here affects you.
+If your extension does not import `getRootPermissionsService`, `publishRootPermissionsService`, or `unpublishRootPermissionsService` from `@svetlovtech/pi-permission-system`, nothing here affects you.
 
 ## What was removed
 
@@ -14,8 +14,8 @@ If your extension does not import `getRootPermissionsService`, `publishRootPermi
 | `unpublishRootPermissionsService(service)`         | — (internal; a node unpublishes its own service) |
 | `PI_PERMISSION_SYSTEM_DEP0001` deprecation warning | — (the deprecated path is gone)                  |
 
-The `Symbol.for("@gotgenes/pi-permission-system:service")` slot is no longer written by any node.
-`Symbol.for("@gotgenes/pi-permission-system:session-services")` — the session-keyed map — is the only service slot.
+The `Symbol.for("@svetlovtech/pi-permission-system:service")` slot is no longer written by any node.
+`Symbol.for("@svetlovtech/pi-permission-system:session-services")` — the session-keyed map — is the only service slot.
 
 ## What to change
 
@@ -27,7 +27,7 @@ import {
   getPermissionsService,
   PERMISSIONS_READY_CHANNEL,
   type PermissionsReadyEvent,
-} from "@gotgenes/pi-permission-system";
+} from "@svetlovtech/pi-permission-system";
 
 let dispose: (() => void) | undefined;
 
